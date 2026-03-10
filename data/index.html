@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <title>PWM 控制器</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- 顶部导航栏 -->
+    <header class="header">
+      <h1 class="header-title">PWM 控制器</h1>
+      <button class="btn-icon" id="btnSettings" title="系统设置">
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+          />
+        </svg>
+      </button>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="main">
+      <!-- 设备卡片列表 -->
+      <div class="device-list" id="deviceList">
+        <!-- JS 动态渲染 -->
+      </div>
+
+      <!-- 空状态提示 -->
+      <div class="empty-state" id="emptyState" style="display: none">
+        <p>暂无设备</p>
+        <p>点击下方按钮添加第一个设备</p>
+      </div>
+
+      <!-- 添加设备按钮 -->
+      <button class="btn-add" id="btnAddDevice">+ 添加设备</button>
+    </main>
+
+    <!-- 提示消息 -->
+    <div class="toast" id="toast"></div>
+
+    <!-- ===== 设备详情弹窗 ===== -->
+    <div class="modal" id="modalDeviceDetail">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="detailTitle">设备详情</h2>
+          <button class="btn-close" id="btnCloseDetail">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="duty-display">
+            <span class="duty-value" id="detailDutyValue">10</span>
+            <span class="duty-unit">%</span>
+          </div>
+          <input
+            type="range"
+            class="slider"
+            id="detailDutySlider"
+            min="0"
+            max="100"
+            value="10"
+          />
+          <div class="slider-labels">
+            <span>0%</span>
+            <span>50%</span>
+            <span>100%</span>
+          </div>
+
+          <div class="detail-info" id="detailInfo">
+            <!-- 设备引脚信息由 JS 填充 -->
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-danger" id="btnDeleteDevice">删除设备</button>
+          <button class="btn btn-primary" id="btnSaveDevices">
+            保存到设备
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 添加/编辑设备弹窗 ===== -->
+    <div class="modal" id="modalAddDevice">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="addDeviceTitle">添加设备</h2>
+          <button class="btn-close" id="btnCloseAdd">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="inputDeviceName">设备名称</label>
+            <input
+              type="text"
+              id="inputDeviceName"
+              placeholder="如：机箱风扇"
+              maxlength="20"
+            />
+          </div>
+          <div class="form-group">
+            <label for="inputPwmPin">PWM 输出引脚</label>
+            <input
+              type="number"
+              id="inputPwmPin"
+              placeholder="GPIO 编号"
+              min="0"
+              max="21"
+            />
+          </div>
+          <div class="form-group">
+            <label for="inputRpmPin">转速读取引脚（可选）</label>
+            <input
+              type="number"
+              id="inputRpmPin"
+              placeholder="留空表示无转速读取"
+              min="-1"
+              max="21"
+            />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" id="btnCancelAdd">取消</button>
+          <button class="btn btn-primary" id="btnConfirmAdd">确认添加</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 系统设置弹窗 ===== -->
+    <div class="modal" id="modalSettings">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>系统设置</h2>
+          <button class="btn-close" id="btnCloseSettings">&times;</button>
+        </div>
+        <div class="modal-body">
+          <h3>WiFi 配置</h3>
+          <div class="form-group">
+            <label for="inputWifiSsid">WiFi SSID</label>
+            <input type="text" id="inputWifiSsid" placeholder="WiFi 名称" />
+          </div>
+          <div class="form-group">
+            <label for="inputWifiPass">WiFi 密码</label>
+            <input type="password" id="inputWifiPass" placeholder="WiFi 密码" />
+          </div>
+          <div class="wifi-status" id="wifiStatus">
+            <!-- WiFi 状态由 JS 填充 -->
+          </div>
+
+          <h3>系统信息</h3>
+          <div class="system-info" id="systemInfo">
+            <!-- 系统信息由 JS 填充 -->
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" id="btnCancelSettings">取消</button>
+          <button class="btn btn-primary" id="btnSaveWifi">保存 WiFi</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
