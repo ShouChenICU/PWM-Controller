@@ -97,6 +97,14 @@ namespace ConfigManager
     bool saveDevices(const std::vector<DeviceConfig> &devices);
 
     /**
+     * @brief 仅将指定单个设备的配置更新到 NVS（不影响其他设备）
+     * @param nvsIndex 设备在 NVS 中的存储索引（即在设备列表中的位置）
+     * @param config   设备配置
+     * @return true 保存成功，false 保存失败
+     */
+    bool saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config);
+
+    /**
      * @brief 生成下一个可用的设备ID
      * @param devices 当前设备列表
      * @return 新的唯一设备ID

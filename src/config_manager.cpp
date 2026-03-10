@@ -18,7 +18,17 @@ static Preferences prefs;
 void ConfigManager::init()
 {
     Serial.println("[Config] NVS 配置管理模块初始化");
-    // Preferences 在每次读写时打开/关闭，无需全局初始化
+
+    // 以读写模式打开一次，确保命名空间存在（首次启动时自动创建）
+    if (!prefs.begin(NVS_NAMESPACE, false))
+    {
+        Serial.println("[Config] NVS 命名空间创建失败!");
+    }
+    else
+    {
+        Serial.println("[Config] NVS 命名空间就绪");
+        prefs.end();
+    }
 }
 
 // ==================== WiFi 配置 ====================
@@ -156,6 +166,34 @@ bool ConfigManager::saveDevices(const std::vector<DeviceConfig> &devices)
 
     prefs.end();
     Serial.printf("[Config] 已保存 %d 个设备到 NVS\n", count);
+    return true;
+}
+
+bool ConfigManager::saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config)
+{
+    if (!prefs.begin(NVS_NAMESPACE, false))
+    {
+        Serial.println("[Config] 打开 NVS 失败（保存单设备）");
+        return false;
+    }
+
+    // 序列化为 JSON 并写入对应索引的键
+    JsonDocument doc;
+    doc["id"] = config.id;
+    doc["name"] = config.name;
+    doc["pwmPin"] = config.pwmPin;
+    doc["rpmPin"] = config.rpmPin;
+    doc["duty"] = config.dutyCycle;
+
+    String json;
+    serializeJson(doc, json);
+
+    String key = String(NVS_KEY_DEV_PREFIX) + String(nvsIndex);
+    prefs.putString(key.c_str(), json);
+    prefs.end();
+
+    Serial.printf("[Config] 单设备已保存: id=%d, key=%s, duty=%d%%\n",
+                  config.id, key.c_str(), config.dutyCycle);
     return true;
 }
 

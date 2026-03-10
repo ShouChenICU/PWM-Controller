@@ -59,8 +59,14 @@
         </div>
         <div class="modal-body">
           <div class="duty-display">
-            <span class="duty-value" id="detailDutyValue">10</span>
-            <span class="duty-unit">%</span>
+            <div class="duty-current">
+              <span class="duty-value" id="detailDutyValue">10</span>
+              <span class="duty-unit">%</span>
+              <span class="duty-tag">当前</span>
+            </div>
+            <div class="duty-saved-row">
+              已保存：<span id="detailSavedDutyValue">10</span>%
+            </div>
           </div>
           <input
             type="range"
@@ -82,9 +88,7 @@
         </div>
         <div class="modal-footer">
           <button class="btn btn-danger" id="btnDeleteDevice">删除设备</button>
-          <button class="btn btn-primary" id="btnSaveDevices">
-            保存到设备
-          </button>
+          <button class="btn btn-primary" id="btnSaveDuty">保存占空比</button>
         </div>
       </div>
     </div>

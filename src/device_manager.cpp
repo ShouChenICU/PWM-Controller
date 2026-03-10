@@ -112,8 +112,12 @@ static void initRPM(Device &dev)
  */
 static void deinitDevice(Device &dev)
 {
-    // 停止 PWM
+    // 先将占空比置 0，使引脚输出低电平
+    ledcWrite(dev.config.pwmPin, 0);
+
+    // 停止 PWM 并重置 GPIO 状态
     ledcDetach(dev.config.pwmPin);
+    pinMode(dev.config.pwmPin, INPUT);
 
     // 解除转速中断
     if (dev.config.rpmPin >= 0)
@@ -309,4 +313,18 @@ bool DeviceManager::saveToNVS()
         configs.push_back(dev.config);
     }
     return ConfigManager::saveDevices(configs);
+}
+
+bool DeviceManager::saveDutyToNVS(uint8_t id)
+{
+    // 遍历设备列表，找到目标设备及其在列表中的位置（即 NVS 索引）
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        if (devices[i].config.id == id)
+        {
+            return ConfigManager::saveOneDevice(static_cast<uint8_t>(i), devices[i].config);
+        }
+    }
+    Serial.printf("[Device] saveDutyToNVS: 未找到设备 id=%d\n", id);
+    return false;
 }

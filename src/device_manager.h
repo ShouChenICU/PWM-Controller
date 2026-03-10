@@ -116,4 +116,11 @@ namespace DeviceManager
      */
     bool saveToNVS();
 
+    /**
+     * @brief 仅将指定设备的当前占空比持久化到 NVS（其他设备不受影响）
+     * @param id 设备ID
+     * @return true 保存成功，false 未找到设备或保存失败
+     */
+    bool saveDutyToNVS(uint8_t id);
+
 } // namespace DeviceManager

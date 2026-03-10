@@ -13,6 +13,12 @@ let devices = [];
 /** 当前选中的设备ID（用于详情弹窗） */
 let selectedDeviceId = null;
 
+/**
+ * 已保存的占空比缓存（key: 设备ID, value: 已持久化的占空比）
+ * 初次加载时与 API 返回值一致；用户点击「保存占空比」后更新。
+ */
+const savedDuties = new Map();
+
 /** 刷新定时器 */
 let refreshTimer = null;
 
@@ -31,6 +37,9 @@ const $detailTitle = document.getElementById("detailTitle");
 const $detailDutyValue = document.getElementById("detailDutyValue");
 const $detailDutySlider = document.getElementById("detailDutySlider");
 const $detailInfo = document.getElementById("detailInfo");
+
+// 设备详情弹窗新增元素
+const $detailSavedDutyValue = document.getElementById("detailSavedDutyValue");
 
 // 添加设备弹窗
 const $modalAdd = document.getElementById("modalAddDevice");
@@ -73,11 +82,25 @@ async function fetchDevices() {
   const data = await api("/api/devices");
   if (data) {
     devices = data;
+    // 对首次出现的设备，将 API 返回的占空比作为已保存值
+    devices.forEach((dev) => {
+      if (!savedDuties.has(dev.id)) {
+        savedDuties.set(dev.id, dev.dutyCycle);
+      }
+    });
     renderDevices();
+    // 如果详情弹窗正在展示，同步刷新已保存占空比显示
+    if (
+      selectedDeviceId !== null &&
+      $modalDetail.classList.contains("active")
+    ) {
+      const $saved = document.getElementById("detailSavedDutyValue");
+      if ($saved) $saved.textContent = savedDuties.get(selectedDeviceId) ?? "-";
+    }
   }
 }
 
-/** 添加设备 */
+/** 添加设备（后端会自动持久化，无需前端额外保存） */
 async function addDevice(name, pwmPin, rpmPin) {
   const data = await api("/api/devices", {
     method: "POST",
@@ -86,6 +109,8 @@ async function addDevice(name, pwmPin, rpmPin) {
   if (data && data.id) {
     showToast("设备添加成功");
     await fetchDevices();
+    // 新设备的已保存占空比初始化为默认值（10%）
+    savedDuties.set(data.id, 10);
   }
   return data;
 }
@@ -214,6 +239,8 @@ function openDeviceDetail(id) {
   $detailTitle.textContent = dev.name;
   $detailDutyValue.textContent = dev.dutyCycle;
   $detailDutySlider.value = dev.dutyCycle;
+  // 显示已持久化的占空比
+  $detailSavedDutyValue.textContent = savedDuties.get(id) ?? dev.dutyCycle;
 
   // 设备信息
   let infoHtml = `<p><strong>设备ID:</strong> ${dev.id}</p>`;
@@ -388,12 +415,18 @@ document
     selectedDeviceId = null;
   });
 
-/** 保存设备配置到 NVS */
-document
-  .getElementById("btnSaveDevices")
-  .addEventListener("click", async () => {
-    await saveDevicesToNVS();
-  });
+/** 保存当前设备的占空比到 NVS（仅针对该设备，不影响其他设备） */
+document.getElementById("btnSaveDuty").addEventListener("click", async () => {
+  if (selectedDeviceId === null) return;
+  const currentDuty = parseInt($detailDutySlider.value);
+  // 仅持久化当前选中设备
+  const data = await api(`/api/devices/${selectedDeviceId}/save`, { method: "POST" });
+  if (data) {
+    savedDuties.set(selectedDeviceId, currentDuty);
+    $detailSavedDutyValue.textContent = currentDuty;
+    showToast("占空比已保存");
+  }
+});
 
 /** 保存 WiFi 配置 */
 document.getElementById("btnSaveWifi").addEventListener("click", async () => {

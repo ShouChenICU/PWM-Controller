@@ -325,6 +325,13 @@ body {
   margin-bottom: 16px;
 }
 
+.duty-current {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+}
+
 .duty-value {
   font-size: 3rem;
   font-weight: 700;
@@ -336,14 +343,33 @@ body {
   color: var(--color-text-secondary);
 }
 
+.duty-tag {
+  font-size: 0.75rem;
+  color: var(--color-primary);
+  background: rgba(33, 150, 243, 0.12);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-left: 4px;
+  align-self: center;
+}
+
+.duty-saved-row {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  margin-top: 4px;
+}
+
 .slider {
-  width: 100%;
-  height: 8px;
   -webkit-appearance: none;
   appearance: none;
+  width: 100%;
+  height: 10px;
   background: var(--color-border);
-  border-radius: 4px;
+  border-radius: 5px;
   outline: none;
+  cursor: pointer;
+  display: block;
+  margin: 12px 0 6px;
 }
 
 .slider::-webkit-slider-thumb {
@@ -355,6 +381,21 @@ body {
   border-radius: 50%;
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+.slider::-moz-range-thumb {
+  width: 28px;
+  height: 28px;
+  background: var(--color-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 10px;
+  border-radius: 5px;
 }
 
 .slider-labels {

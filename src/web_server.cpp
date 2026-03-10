@@ -97,13 +97,80 @@ static void registerDeviceAPI()
         serializeJson(doc, json);
         request->send(200, "application/json", json); });
 
-    // ---- POST /api/devices : 添加新设备 ----
+    // ---- POST /api/devices[/...] : 统一处理所有 POST 请求 ----
+    // 注意：ESPAsyncWebServer 的 server.on 是前缀匹配，
+    // /api/devices/save、/api/devices/1/duty 等子路径均会命中此路由，
+    // 因此在回调中通过 URL 精确分发到各自的处理逻辑。
     server.on("/api/devices", HTTP_POST,
-              // 请求完成回调（处理 body 数据在 onBody 中）
-              [](AsyncWebServerRequest *request) {}, nullptr,
-              // onBody 回调：接收请求体
+              // 请求完成回调：处理无 body 的 POST 子路径（如 /api/devices/{id}/save）
+              [](AsyncWebServerRequest *request)
+              {
+                  String url = request->url();
+                  // ---- POST /api/devices/save : 持久化所有设备到 NVS（无 body） ----
+                  if (url == "/api/devices/save")
+                  {
+                      if (DeviceManager::saveToNVS())
+                      {
+                          sendOk(request, "设备配置已保存");
+                      }
+                      else
+                      {
+                          sendError(request, 500, "保存失败");
+                      }
+                      return;
+                  }
+                  // ---- POST /api/devices/{id}/save : 仅保存该设备占空比到 NVS ----
+                  if (url.endsWith("/save") && url.startsWith("/api/devices/"))
+                  {
+                      String sub = url.substring(13); // {id}/save
+                      uint8_t id = sub.toInt();
+                      if (DeviceManager::saveDutyToNVS(id))
+                      {
+                          sendOk(request, "占空比已保存");
+                      }
+                      else
+                      {
+                          sendError(request, 404, "设备不存在");
+                      }
+                      return;
+                  }
+                  // 其他 POST 请求（有 body）由下方 onBody 回调负责发送响应
+              },
+              nullptr,
+              // onBody 回调：根据 URL 分发到不同的处理逻辑
               [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
               {
+            String url = request->url();
+
+            // ---- POST /api/devices/{id}/duty : 设置占空比（仅内存） ----
+            if (url.indexOf("/duty") > 0 && url.startsWith("/api/devices/")) {
+                String sub = url.substring(13);  // {id}/duty
+                int slashPos = sub.indexOf('/');
+                if (slashPos < 0) {
+                    sendError(request, 400, "URL 格式错误");
+                    return;
+                }
+                uint8_t id = sub.substring(0, slashPos).toInt();
+
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, data, len);
+                if (err) {
+                    sendError(request, 400, "JSON 解析失败");
+                    return;
+                }
+
+                uint8_t dutyCycle = doc["dutyCycle"] | 0;
+                if (DeviceManager::setDutyCycle(id, dutyCycle)) {
+                    sendOk(request, "占空比已设置");
+                } else {
+                    sendError(request, 404, "设备不存在");
+                }
+                return;
+            }
+
+            // ---- POST /api/devices : 添加新设备 ----
+            if (url != "/api/devices") return;  // 未知子路径则跳过
+
             JsonDocument doc;
             DeserializationError err = deserializeJson(doc, data, len);
             if (err) {
@@ -121,6 +188,9 @@ static void registerDeviceAPI()
                 return;
             }
 
+            // 添加设备后立即持久化到 NVS
+            DeviceManager::saveToNVS();
+
             // 返回新设备信息
             JsonDocument respDoc;
             respDoc["message"] = "设备添加成功";
@@ -128,15 +198,6 @@ static void registerDeviceAPI()
             String json;
             serializeJson(respDoc, json);
             request->send(201, "application/json", json); });
-
-    // ---- POST /api/devices/save : 持久化所有设备到 NVS ----
-    server.on("/api/devices/save", HTTP_POST, [](AsyncWebServerRequest *request)
-              {
-        if (DeviceManager::saveToNVS()) {
-            sendOk(request, "设备配置已保存");
-        } else {
-            sendError(request, 500, "保存失败");
-        } });
 }
 
 /**
@@ -148,8 +209,8 @@ static void registerDeviceAPI()
 static void registerDeviceParamAPI()
 {
 
-    // 处理 /api/devices/xxx 的统一回调
-    // 使用 server.onRequestBody 来处理带 body 的请求
+    // 处理 /api/devices/xxx 的统一回调（仅处理 PUT 请求）
+    // 注意：POST /api/devices/{id}/duty 已在 registerDeviceAPI 中处理
     server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
                          {
         String url = request->url();
@@ -175,32 +236,6 @@ static void registerDeviceParamAPI()
             } else {
                 sendError(request, 404, "设备不存在");
             }
-        }
-
-        // ---- POST /api/devices/{id}/duty : 设置占空比 ----
-        if (request->method() == HTTP_POST && url.indexOf("/duty") > 0 && url.startsWith("/api/devices/")) {
-            // 解析 URL: /api/devices/{id}/duty
-            String sub = url.substring(13);  // {id}/duty
-            int slashPos = sub.indexOf('/');
-            if (slashPos < 0) {
-                sendError(request, 400, "URL 格式错误");
-                return;
-            }
-            uint8_t id = sub.substring(0, slashPos).toInt();
-
-            JsonDocument doc;
-            DeserializationError err = deserializeJson(doc, data, len);
-            if (err) {
-                sendError(request, 400, "JSON 解析失败");
-                return;
-            }
-
-            uint8_t dutyCycle = doc["dutyCycle"] | 0;
-            if (DeviceManager::setDutyCycle(id, dutyCycle)) {
-                sendOk(request, "占空比已设置");
-            } else {
-                sendError(request, 404, "设备不存在");
-            }
         } });
 
     // ---- DELETE /api/devices/{id} : 删除设备 ----
@@ -214,6 +249,8 @@ static void registerDeviceParamAPI()
             uint8_t id = idStr.toInt();
 
             if (DeviceManager::removeDevice(id)) {
+                // 删除后立即持久化到 NVS，防止重启后设备复现
+                DeviceManager::saveToNVS();
                 sendOk(request, "设备已删除");
             } else {
                 sendError(request, 404, "设备不存在");
