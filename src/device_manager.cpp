@@ -17,9 +17,6 @@ static std::vector<Device> devices;
 /// 下一个可用的 PWM 通道号
 static uint8_t nextChannel = 0;
 
-/// 上次转速计算时间
-static unsigned long lastRpmCalcTime = 0;
-
 // ==================== 中断服务程序 ====================
 
 /**
@@ -34,12 +31,47 @@ static unsigned long lastRpmCalcTime = 0;
 static Device *rpmDevicePtrs[MAX_RPM_DEVICES] = {nullptr};
 static uint8_t rpmDeviceCount = 0;
 
-/// 通用 ISR 模板，通过索引区分不同设备
-#define DEFINE_RPM_ISR(idx)                   \
-    static void IRAM_ATTR rpmISR_##idx()      \
-    {                                         \
-        if (rpmDevicePtrs[idx])               \
-            rpmDevicePtrs[idx]->pulseCount++; \
+/**
+ * @brief ISR 内计算相邻有效脉冲间隔并写入环形缓冲区
+ *
+ * 去抖/抗混叠策略：
+ *   - lastEdgeTime 在每次中断触发时始终更新，此举显著为关键：
+ *     若仅在脉冲通过过滤时才更新，高频噪声（如 25kHz PWM 泄漏）
+ *     会在 ~DEBOUNCE_US 后积累成假的“有效间隔”，产生混叠假读数。
+ *   - 始终更新后，连续噪声的每个边沿只看到 ~40μs，永远被拒绝。
+ *   - lastValidTime 单独追踪最近一次通过去抖的脉冲，用于计算真实周期。
+ */
+#define DEFINE_RPM_ISR(idx)                                 \
+    static void IRAM_ATTR rpmISR_##idx()                    \
+    {                                                       \
+        Device *d = rpmDevicePtrs[idx];                     \
+        if (!d)                                             \
+            return;                                         \
+        uint32_t now = micros();                            \
+        if (now == 0)                                       \
+            now = 1; /* 避免与哨兵值 0 混淆 */              \
+        /* 去抖：距上次任意边沿太近则丢弃 */                \
+        if (d->lastEdgeTime != 0)                           \
+        {                                                   \
+            uint32_t sinceEdge = now - d->lastEdgeTime;     \
+            d->lastEdgeTime = now; /* 始终更新，防混叠 */   \
+            if (sinceEdge < RPM_DEBOUNCE_US)                \
+                return;                                     \
+        }                                                   \
+        else                                                \
+        {                                                   \
+            d->lastEdgeTime = now;                          \
+        }                                                   \
+        /* 通过去抖，视为有效脉冲 */                        \
+        if (d->lastValidTime != 0)                          \
+        {                                                   \
+            uint32_t period = now - d->lastValidTime;       \
+            uint32_t pos =                                  \
+                d->pulseWriteCount % RPM_PULSE_BUFFER_SIZE; \
+            d->pulsePeriods[pos] = period;                  \
+            d->pulseWriteCount++;                           \
+        }                                                   \
+        d->lastValidTime = now;                             \
     }
 
 // 定义 8 个 ISR（对应最多 8 个转速设备）
@@ -99,7 +131,11 @@ static void initRPM(Device &dev)
     // 注册中断
     uint8_t idx = rpmDeviceCount;
     rpmDevicePtrs[idx] = &dev;
-    dev.pulseCount = 0;
+    dev.pulseWriteCount = 0;
+    dev.lastEdgeTime = 0;
+    dev.lastValidTime = 0;
+    memset((void *)dev.pulsePeriods, 0, sizeof(dev.pulsePeriods));
+    dev.rpmEma = 0.0f;
     dev.rpm = 0;
     attachInterrupt(digitalPinToInterrupt(dev.config.rpmPin), rpmISRTable[idx], FALLING);
     rpmDeviceCount++;
@@ -153,7 +189,10 @@ void DeviceManager::init()
         Device dev;
         dev.config = cfg;
         dev.rpm = 0;
-        dev.pulseCount = 0;
+        dev.pulseWriteCount = 0;
+        dev.lastEdgeTime = 0;
+        dev.lastValidTime = 0;
+        dev.rpmEma = 0.0f;
         dev.pwmChannel = 0;
 
         devices.push_back(dev);
@@ -166,34 +205,103 @@ void DeviceManager::init()
         initRPM(dev);
     }
 
-    lastRpmCalcTime = millis();
     Serial.printf("[Device] 共加载 %d 个设备\n", devices.size());
+}
+
+/**
+ * @brief 对小数组进行插入排序（用于中位值滤波）
+ * @param arr 数组指针
+ * @param n 元素数量
+ */
+static void insertionSort(uint32_t *arr, uint8_t n)
+{
+    for (uint8_t i = 1; i < n; i++)
+    {
+        uint32_t key = arr[i];
+        int8_t j = (int8_t)i - 1;
+        while (j >= 0 && arr[j] > key)
+        {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
 }
 
 void DeviceManager::update()
 {
-    unsigned long now = millis();
+    // 限制更新频率，避免每次 loop 都计算
+    static uint32_t lastUpdateMs = 0;
+    uint32_t nowMs = millis();
+    if (nowMs - lastUpdateMs < RPM_UPDATE_INTERVAL_MS)
+        return;
+    lastUpdateMs = nowMs;
 
-    // 每隔 RPM_CALC_INTERVAL_MS 计算一次转速
-    if (now - lastRpmCalcTime >= RPM_CALC_INTERVAL_MS)
+    uint32_t nowUs = micros();
+
+    for (auto &dev : devices)
     {
-        unsigned long elapsed = now - lastRpmCalcTime;
-        lastRpmCalcTime = now;
+        if (dev.config.rpmPin < 0)
+            continue;
 
-        for (auto &dev : devices)
+        // 原子读取脉冲间隔缓冲区副本
+        noInterrupts();
+        uint32_t writeCount = dev.pulseWriteCount;
+        uint32_t lastValid = dev.lastValidTime;
+        uint32_t periods[RPM_PULSE_BUFFER_SIZE];
+        memcpy(periods, (const void *)dev.pulsePeriods, sizeof(periods));
+        interrupts();
+
+        uint16_t rawRpm = 0;
+
+        if (lastValid == 0 || writeCount == 0)
         {
-            if (dev.config.rpmPin < 0)
-                continue;
-
-            // 读取并重置脉冲计数（临界区保护）
-            noInterrupts();
-            uint32_t pulses = dev.pulseCount;
-            dev.pulseCount = 0;
-            interrupts();
-
-            // 转速 = (脉冲数 / 每转脉冲数) * (60000 / 经过毫秒数)
-            dev.rpm = (uint16_t)((pulses * 60000UL) / (PULSES_PER_REVOLUTION * elapsed));
+            // 从未收到有效脉冲间隔
+            rawRpm = 0;
         }
+        else if ((nowUs - lastValid) > RPM_STALL_TIMEOUT_US)
+        {
+            // 超时，风扇已停止（或信号全是噪声无法解读）
+            rawRpm = 0;
+        }
+        else
+        {
+            // 取缓冲区中有效的间隔数量
+            uint8_t count = (writeCount < RPM_PULSE_BUFFER_SIZE)
+                                ? (uint8_t)writeCount
+                                : RPM_PULSE_BUFFER_SIZE;
+
+            // 复制有效数据并排序（中位值滤波）
+            uint32_t sorted[RPM_PULSE_BUFFER_SIZE];
+            memcpy(sorted, periods, count * sizeof(uint32_t));
+            insertionSort(sorted, count);
+
+            // 取中位值：对称地取中间元素，拒绝离群值干扰
+            uint32_t medianPeriod = sorted[count / 2];
+
+            if (medianPeriod > 0)
+            {
+                uint16_t calcRpm = (uint16_t)(60000000UL / ((uint32_t)PULSES_PER_REVOLUTION * medianPeriod));
+                // 合法性钳位：超过上限视为噪声
+                rawRpm = (calcRpm <= RPM_MAX_VALID) ? calcRpm : 0;
+            }
+        }
+
+        // EMA 平滑：风扇停止时立刻归零，首次有效读数直接赋值避免从 0 慢慢爬升
+        if (rawRpm == 0)
+        {
+            dev.rpmEma = 0.0f;
+        }
+        else if (dev.rpmEma < 1.0f)
+        {
+            dev.rpmEma = (float)rawRpm;
+        }
+        else
+        {
+            dev.rpmEma = RPM_EMA_ALPHA * (float)rawRpm + (1.0f - RPM_EMA_ALPHA) * dev.rpmEma;
+        }
+
+        dev.rpm = (uint16_t)(dev.rpmEma + 0.5f); // 四舍五入
     }
 }
 
@@ -237,7 +345,10 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
     dev.config.dutyCycle = DEFAULT_DUTY_CYCLE;
     dev.config.inverted = inverted;
     dev.rpm = 0;
-    dev.pulseCount = 0;
+    dev.pulseWriteCount = 0;
+    dev.lastEdgeTime = 0;
+    dev.lastValidTime = 0;
+    dev.rpmEma = 0.0f;
     dev.pwmChannel = 0;
 
     devices.push_back(dev);

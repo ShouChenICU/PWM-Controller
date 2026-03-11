@@ -58,6 +58,11 @@ body {
   font-weight: 600;
 }
 
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .btn-icon {
   background: none;
   border: none;
