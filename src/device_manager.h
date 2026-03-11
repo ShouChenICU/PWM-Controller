@@ -81,9 +81,10 @@ namespace DeviceManager
      * @param name 设备名称
      * @param pwmPin PWM 输出引脚
      * @param rpmPin 转速读取引脚（-1 表示无）
+     * @param inverted 是否反转信号
      * @return 新设备的 ID，失败返回 0
      */
-    uint8_t addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin);
+    uint8_t addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted = false);
 
     /**
      * @brief 更新设备配置
@@ -91,9 +92,10 @@ namespace DeviceManager
      * @param name 新名称
      * @param pwmPin 新 PWM 引脚
      * @param rpmPin 新转速引脚
+     * @param inverted 是否反转信号
      * @return true 更新成功，false 未找到设备
      */
-    bool updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin);
+    bool updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted = false);
 
     /**
      * @brief 删除设备
@@ -122,5 +124,12 @@ namespace DeviceManager
      * @return true 保存成功，false 未找到设备或保存失败
      */
     bool saveDutyToNVS(uint8_t id);
+
+    /**
+     * @brief 获取指定设备上一次保存到 NVS 的占空比
+     * @param id 设备ID
+     * @return 已保存的占空比 (0-100)
+     */
+    uint8_t getSavedDuty(uint8_t id);
 
 } // namespace DeviceManager

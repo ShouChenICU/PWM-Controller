@@ -61,13 +61,14 @@ data/
 - pwmPin: uint8_t       // PWM 输出引脚
 - rpmPin: int8_t        // 转速读取引脚（-1 表示无）
 - dutyCycle: uint8_t    // 当前占空比 (0-100)，默认 10%
+- inverted: bool        // 是否反转 PWM 信号
 - rpm: uint16_t         // 当前转速（仅运行时有效）
 ```
 
 ### API 设计
 - `GET  /api/devices`        — 获取所有设备列表
-- `POST /api/devices`        — 添加新设备
-- `PUT  /api/devices/{id}`   — 更新设备配置（含占空比）
+- `POST /api/devices`        — 添加新设备（含 inverted 标志）
+- `PUT  /api/devices/{id}`   — 更新设备配置（含 inverted 标志）
 - `DELETE /api/devices/{id}` — 删除设备
 - `POST /api/devices/{id}/duty` — 设置占空比（仅内存）
 - `POST /api/devices/save`   — 持久化所有设备配置到 NVS

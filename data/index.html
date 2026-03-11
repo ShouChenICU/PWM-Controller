@@ -68,14 +68,18 @@
               已保存：<span id="detailSavedDutyValue">10</span>%
             </div>
           </div>
-          <input
-            type="range"
-            class="slider"
-            id="detailDutySlider"
-            min="0"
-            max="100"
-            value="10"
-          />
+          <div class="slider-container">
+            <button class="btn-step" id="btnDutyMinus" title="减少 1%">-</button>
+            <input
+              type="range"
+              class="slider"
+              id="detailDutySlider"
+              min="0"
+              max="100"
+              value="10"
+            />
+            <button class="btn-step" id="btnDutyPlus" title="增加 1%">+</button>
+          </div>
           <div class="slider-labels">
             <span>0%</span>
             <span>50%</span>
@@ -129,6 +133,10 @@
               min="-1"
               max="21"
             />
+          </div>
+          <div class="form-group checkbox-group">
+            <input type="checkbox" id="inputInverted" />
+            <label for="inputInverted">反转 PWM 信号 (10% -> 90%)</label>
           </div>
         </div>
         <div class="modal-footer">

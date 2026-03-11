@@ -70,6 +70,8 @@ static void deviceToJson(const Device &dev, JsonObject obj)
     obj["pwmPin"] = dev.config.pwmPin;
     obj["rpmPin"] = dev.config.rpmPin;
     obj["dutyCycle"] = dev.config.dutyCycle;
+    obj["savedDutyCycle"] = DeviceManager::getSavedDuty(dev.config.id);
+    obj["inverted"] = dev.config.inverted;
     obj["rpm"] = dev.rpm;
 }
 
@@ -181,8 +183,9 @@ static void registerDeviceAPI()
             String name = doc["name"] | "未命名";
             uint8_t pwmPin = doc["pwmPin"] | 0;
             int8_t rpmPin = doc["rpmPin"] | -1;
+            bool inverted = doc["inverted"] | false;
 
-            uint8_t id = DeviceManager::addDevice(name, pwmPin, rpmPin);
+            uint8_t id = DeviceManager::addDevice(name, pwmPin, rpmPin, inverted);
             if (id == 0) {
                 sendError(request, 500, "添加设备失败");
                 return;
@@ -230,8 +233,9 @@ static void registerDeviceParamAPI()
             String name = doc["name"] | "";
             uint8_t pwmPin = doc["pwmPin"] | 0;
             int8_t rpmPin = doc["rpmPin"] | -1;
+            bool inverted = doc["inverted"] | false;
 
-            if (DeviceManager::updateDevice(id, name, pwmPin, rpmPin)) {
+            if (DeviceManager::updateDevice(id, name, pwmPin, rpmPin, inverted)) {
                 sendOk(request, "设备已更新");
             } else {
                 sendError(request, 404, "设备不存在");

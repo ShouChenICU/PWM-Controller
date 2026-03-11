@@ -43,6 +43,7 @@ struct DeviceConfig
     uint8_t pwmPin;    ///< PWM 输出引脚
     int8_t rpmPin;     ///< 转速读取引脚（-1 表示无）
     uint8_t dutyCycle; ///< 当前占空比 (0-100)
+    bool inverted;     ///< 是否反转 PWM 信号
 };
 
 /**
@@ -103,6 +104,14 @@ namespace ConfigManager
      * @return true 保存成功，false 保存失败
      */
     bool saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config);
+
+    /**
+     * @brief 获取指定 NVS 索引下设备已保存的占空比
+     * @param nvsIndex 设备在 NVS 中的索引
+     * @param defaultDuty 默认占空比（如果获取失败）
+     * @return 已保存的占空比 (0-100)
+     */
+    uint8_t getSavedDuty(uint8_t nvsIndex, uint8_t defaultDuty);
 
     /**
      * @brief 生成下一个可用的设备ID

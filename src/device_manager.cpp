@@ -71,11 +71,12 @@ static void initPWM(Device &dev)
     ledcAttach(dev.config.pwmPin, PWM_FREQUENCY, PWM_RESOLUTION);
 
     // 设置初始占空比（将百分比映射到 0-255）
-    uint32_t duty = map(dev.config.dutyCycle, 0, 100, 0, 255);
+    uint8_t effectiveDuty = dev.config.inverted ? (100 - dev.config.dutyCycle) : dev.config.dutyCycle;
+    uint32_t duty = map(effectiveDuty, 0, 100, 0, 255);
     ledcWrite(dev.config.pwmPin, duty);
 
-    Serial.printf("[Device] PWM 初始化: pin=%d, channel=%d, duty=%d%%\n",
-                  dev.config.pwmPin, dev.pwmChannel, dev.config.dutyCycle);
+    Serial.printf("[Device] PWM 初始化: pin=%d, channel=%d, duty=%d%%, inverted=%s\n",
+                  dev.config.pwmPin, dev.pwmChannel, dev.config.dutyCycle, dev.config.inverted ? "是" : "否");
 }
 
 /**
@@ -213,7 +214,7 @@ Device *DeviceManager::findDevice(uint8_t id)
     return nullptr;
 }
 
-uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin)
+uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted)
 {
     if (devices.size() >= MAX_DEVICE_COUNT)
     {
@@ -221,7 +222,7 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
         return 0;
     }
 
-    // 提取当前配置列表用于生成 ID
+    // 获取下一个 ID
     std::vector<DeviceConfig> configs;
     for (const auto &d : devices)
     {
@@ -234,22 +235,23 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
     dev.config.pwmPin = pwmPin;
     dev.config.rpmPin = rpmPin;
     dev.config.dutyCycle = DEFAULT_DUTY_CYCLE;
+    dev.config.inverted = inverted;
     dev.rpm = 0;
     dev.pulseCount = 0;
     dev.pwmChannel = 0;
 
     devices.push_back(dev);
 
-    // 初始化新设备（引用最后一个元素）
+    // 初始化新设备
     Device &newDev = devices.back();
     initPWM(newDev);
     initRPM(newDev);
 
-    Serial.printf("[Device] 添加设备: id=%d, name=%s\n", dev.config.id, name.c_str());
+    Serial.printf("[Device] 添加设备: id=%d, name=%s, inverted=%s\n", dev.config.id, name.c_str(), inverted ? "是" : "否");
     return dev.config.id;
 }
 
-bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin)
+bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted)
 {
     Device *dev = findDevice(id);
     if (!dev)
@@ -262,12 +264,13 @@ bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin,
     dev->config.name = name;
     dev->config.pwmPin = pwmPin;
     dev->config.rpmPin = rpmPin;
+    dev->config.inverted = inverted;
 
     // 重新初始化
     initPWM(*dev);
     initRPM(*dev);
 
-    Serial.printf("[Device] 更新设备: id=%d, name=%s\n", id, name.c_str());
+    Serial.printf("[Device] 更新设备: id=%d, name=%s, inverted=%s\n", id, name.c_str(), inverted ? "是" : "否");
     return true;
 }
 
@@ -297,10 +300,11 @@ bool DeviceManager::setDutyCycle(uint8_t id, uint8_t dutyCycle)
     dev->config.dutyCycle = dutyCycle;
 
     // 更新 PWM 输出（百分比映射到 0-255）
-    uint32_t duty = map(dutyCycle, 0, 100, 0, 255);
+    uint8_t effectiveDuty = dev->config.inverted ? (100 - dutyCycle) : dutyCycle;
+    uint32_t duty = map(effectiveDuty, 0, 100, 0, 255);
     ledcWrite(dev->config.pwmPin, duty);
 
-    Serial.printf("[Device] 设置占空比: id=%d, duty=%d%%\n", id, dutyCycle);
+    Serial.printf("[Device] 设置占空比: id=%d, duty=%d%% (有效=%d%%)\n", id, dutyCycle, effectiveDuty);
     return true;
 }
 
@@ -327,4 +331,16 @@ bool DeviceManager::saveDutyToNVS(uint8_t id)
     }
     Serial.printf("[Device] saveDutyToNVS: 未找到设备 id=%d\n", id);
     return false;
+}
+
+uint8_t DeviceManager::getSavedDuty(uint8_t id)
+{
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        if (devices[i].config.id == id)
+        {
+            return ConfigManager::getSavedDuty(static_cast<uint8_t>(i), devices[i].config.dutyCycle);
+        }
+    }
+    return 0;
 }

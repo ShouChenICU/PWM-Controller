@@ -40,6 +40,8 @@ const $detailInfo = document.getElementById("detailInfo");
 
 // 设备详情弹窗新增元素
 const $detailSavedDutyValue = document.getElementById("detailSavedDutyValue");
+const $btnDutyMinus = document.getElementById("btnDutyMinus");
+const $btnDutyPlus = document.getElementById("btnDutyPlus");
 
 // 添加设备弹窗
 const $modalAdd = document.getElementById("modalAddDevice");
@@ -47,6 +49,7 @@ const $addDeviceTitle = document.getElementById("addDeviceTitle");
 const $inputName = document.getElementById("inputDeviceName");
 const $inputPwmPin = document.getElementById("inputPwmPin");
 const $inputRpmPin = document.getElementById("inputRpmPin");
+const $inputInverted = document.getElementById("inputInverted");
 
 // 系统设置弹窗
 const $modalSettings = document.getElementById("modalSettings");
@@ -82,11 +85,9 @@ async function fetchDevices() {
   const data = await api("/api/devices");
   if (data) {
     devices = data;
-    // 对首次出现的设备，将 API 返回的占空比作为已保存值
+    // 从后端返回的 savedDutyCycle 更新已保存值缓存
     devices.forEach((dev) => {
-      if (!savedDuties.has(dev.id)) {
-        savedDuties.set(dev.id, dev.dutyCycle);
-      }
+      savedDuties.set(dev.id, dev.savedDutyCycle);
     });
     renderDevices();
     // 如果详情弹窗正在展示，同步刷新已保存占空比显示
@@ -101,10 +102,10 @@ async function fetchDevices() {
 }
 
 /** 添加设备（后端会自动持久化，无需前端额外保存） */
-async function addDevice(name, pwmPin, rpmPin) {
+async function addDevice(name, pwmPin, rpmPin, inverted) {
   const data = await api("/api/devices", {
     method: "POST",
-    body: JSON.stringify({ name, pwmPin, rpmPin }),
+    body: JSON.stringify({ name, pwmPin, rpmPin, inverted }),
   });
   if (data && data.id) {
     showToast("设备添加成功");
@@ -116,10 +117,10 @@ async function addDevice(name, pwmPin, rpmPin) {
 }
 
 /** 更新设备配置 */
-async function updateDevice(id, name, pwmPin, rpmPin) {
+async function updateDevice(id, name, pwmPin, rpmPin, inverted) {
   const data = await api(`/api/devices/${id}`, {
     method: "PUT",
-    body: JSON.stringify({ name, pwmPin, rpmPin }),
+    body: JSON.stringify({ name, pwmPin, rpmPin, inverted }),
   });
   if (data) {
     showToast("设备已更新");
@@ -149,6 +150,15 @@ async function saveDevicesToNVS() {
   const data = await api("/api/devices/save", { method: "POST" });
   if (data) {
     showToast("设备配置已保存到设备");
+    // 更新所有设备的已保存占空比为当前实时值
+    devices.forEach((dev) => {
+      savedDuties.set(dev.id, dev.dutyCycle);
+    });
+    // 如果详情页正在显示，刷新其已保存值的文本
+    if (selectedDeviceId !== null) {
+      const $saved = document.getElementById("detailSavedDutyValue");
+      if ($saved) $saved.textContent = savedDuties.get(selectedDeviceId);
+    }
   }
 }
 
@@ -245,6 +255,9 @@ function openDeviceDetail(id) {
   // 设备信息
   let infoHtml = `<p><strong>设备ID:</strong> ${dev.id}</p>`;
   infoHtml += `<p><strong>PWM 引脚:</strong> GPIO${dev.pwmPin}</p>`;
+  if (dev.inverted) {
+    infoHtml += `<p><strong>PWM 信号:</strong> 反转 (10% -> 90%)</p>`;
+  }
   if (dev.rpmPin >= 0) {
     infoHtml += `<p><strong>转速引脚:</strong> GPIO${dev.rpmPin}</p>`;
     infoHtml += `<p><strong>当前转速:</strong> ${dev.rpm} RPM</p>`;
@@ -262,6 +275,7 @@ function openAddDevice() {
   $inputName.value = "";
   $inputPwmPin.value = "";
   $inputRpmPin.value = "";
+  $inputInverted.checked = false;
   showModal($modalAdd);
 }
 
@@ -354,6 +368,32 @@ $detailDutySlider.addEventListener("change", function () {
   }
 });
 
+/** 占空比微调按钮 - 减少 1% */
+$btnDutyMinus.addEventListener("click", function () {
+  let val = parseInt($detailDutySlider.value);
+  if (val > 0) {
+    val--;
+    $detailDutySlider.value = val;
+    $detailDutyValue.textContent = val;
+    if (selectedDeviceId !== null) {
+      setDutyCycle(selectedDeviceId, val);
+    }
+  }
+});
+
+/** 占空比微调按钮 - 增加 1% */
+$btnDutyPlus.addEventListener("click", function () {
+  let val = parseInt($detailDutySlider.value);
+  if (val < 100) {
+    val++;
+    $detailDutySlider.value = val;
+    $detailDutyValue.textContent = val;
+    if (selectedDeviceId !== null) {
+      setDutyCycle(selectedDeviceId, val);
+    }
+  }
+});
+
 /** 设置按钮 → 打开系统设置 */
 document.getElementById("btnSettings").addEventListener("click", openSettings);
 
@@ -389,6 +429,7 @@ document.getElementById("btnConfirmAdd").addEventListener("click", async () => {
   const pwmPin = parseInt($inputPwmPin.value);
   const rpmPin =
     $inputRpmPin.value.trim() === "" ? -1 : parseInt($inputRpmPin.value);
+  const inverted = $inputInverted.checked;
 
   if (!name) {
     showToast("请输入设备名称");
@@ -399,7 +440,7 @@ document.getElementById("btnConfirmAdd").addEventListener("click", async () => {
     return;
   }
 
-  await addDevice(name, pwmPin, rpmPin);
+  await addDevice(name, pwmPin, rpmPin, inverted);
   closeModal($modalAdd);
 });
 
@@ -420,7 +461,9 @@ document.getElementById("btnSaveDuty").addEventListener("click", async () => {
   if (selectedDeviceId === null) return;
   const currentDuty = parseInt($detailDutySlider.value);
   // 仅持久化当前选中设备
-  const data = await api(`/api/devices/${selectedDeviceId}/save`, { method: "POST" });
+  const data = await api(`/api/devices/${selectedDeviceId}/save`, {
+    method: "POST",
+  });
   if (data) {
     savedDuties.set(selectedDeviceId, currentDuty);
     $detailSavedDutyValue.textContent = currentDuty;

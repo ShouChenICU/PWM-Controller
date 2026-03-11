@@ -113,10 +113,11 @@ std::vector<DeviceConfig> ConfigManager::loadDevices()
         dev.pwmPin = doc["pwmPin"] | 0;
         dev.rpmPin = doc["rpmPin"] | -1;
         dev.dutyCycle = doc["duty"] | DEFAULT_DUTY_CYCLE;
+        dev.inverted = doc["inverted"] | false;
 
         devices.push_back(dev);
-        Serial.printf("[Config] 加载设备: id=%d, name=%s, pwm=%d, rpm=%d, duty=%d%%\n",
-                      dev.id, dev.name.c_str(), dev.pwmPin, dev.rpmPin, dev.dutyCycle);
+        Serial.printf("[Config] 加载设备: id=%d, name=%s, pwm=%d, rpm=%d, duty=%d%%, inverted=%s\n",
+                      dev.id, dev.name.c_str(), dev.pwmPin, dev.rpmPin, dev.dutyCycle, dev.inverted ? "是" : "否");
     }
 
     prefs.end();
@@ -154,6 +155,7 @@ bool ConfigManager::saveDevices(const std::vector<DeviceConfig> &devices)
         doc["pwmPin"] = dev.pwmPin;
         doc["rpmPin"] = dev.rpmPin;
         doc["duty"] = dev.dutyCycle;
+        doc["inverted"] = dev.inverted;
 
         String json;
         serializeJson(doc, json);
@@ -184,6 +186,7 @@ bool ConfigManager::saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config)
     doc["pwmPin"] = config.pwmPin;
     doc["rpmPin"] = config.rpmPin;
     doc["duty"] = config.dutyCycle;
+    doc["inverted"] = config.inverted;
 
     String json;
     serializeJson(doc, json);
@@ -195,6 +198,32 @@ bool ConfigManager::saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config)
     Serial.printf("[Config] 单设备已保存: id=%d, key=%s, duty=%d%%\n",
                   config.id, key.c_str(), config.dutyCycle);
     return true;
+}
+
+uint8_t ConfigManager::getSavedDuty(uint8_t nvsIndex, uint8_t defaultDuty)
+{
+    if (!prefs.begin(NVS_NAMESPACE, true))
+    {
+        return defaultDuty;
+    }
+
+    String key = String(NVS_KEY_DEV_PREFIX) + String(nvsIndex);
+    String json = prefs.getString(key.c_str(), "");
+    prefs.end();
+
+    if (json.isEmpty())
+    {
+        return defaultDuty;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err)
+    {
+        return defaultDuty;
+    }
+
+    return doc["duty"] | defaultDuty;
 }
 
 uint8_t ConfigManager::nextDeviceId(const std::vector<DeviceConfig> &devices)
