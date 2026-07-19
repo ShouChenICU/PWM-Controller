@@ -1,375 +1,533 @@
 /**
  * @file web_server.cpp
- * @brief Web 服务器模块实现
+ * @brief Web 静态资源与 REST API 实现
  *
- * 提供 RESTful API 接口和 LittleFS 静态资源托管。
- * API 路由：
- *   GET    /api/devices           获取设备列表
- *   POST   /api/devices           添加新设备
- *   PUT    /api/devices/{id}      更新设备配置
- *   DELETE /api/devices/{id}      删除设备
- *   POST   /api/devices/{id}/duty 设置占空比（仅内存）
- *   POST   /api/devices/save      持久化所有设备到 NVS
- *   GET    /api/wifi              获取 WiFi 配置
- *   POST   /api/wifi              更新 WiFi 配置并重连
- *   GET    /api/system/info       获取系统信息
+ * JSON API 使用 AsyncCallbackJsonWebHandler，由库负责完整接收分片 body 后解析，
+ * 避免直接解析单个 TCP 分片。所有动态路径均进行严格格式校验。
  */
 
 #include "web_server.h"
-#include "device_manager.h"
-#include "wifi_manager.h"
 #include "config_manager.h"
+#include "device_manager.h"
+#include "project_version.h"
+#include "wifi_manager.h"
 
-#include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <AsyncJson.h>
+#include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
+#include <WebAuthentication.h>
+#include <atomic>
 
-/// Web 服务器实例
-static AsyncWebServer server(WEB_SERVER_PORT);
-
-// ==================== 辅助函数 ====================
-
-/**
- * @brief 返回 JSON 错误响应
- * @param request 请求对象
- * @param code HTTP 状态码
- * @param message 错误信息
- */
-static void sendError(AsyncWebServerRequest *request, int code, const String &message)
+namespace
 {
-    JsonDocument doc;
-    doc["error"] = message;
-    String json;
-    serializeJson(doc, json);
-    request->send(code, "application/json", json);
-}
+    AsyncWebServer server(WEB_SERVER_PORT);
+    AsyncAuthenticationMiddleware authentication;
+    constexpr char DEFAULT_WEB_USERNAME[] = "admin";
+    constexpr char DEFAULT_WEB_PASSWORD[] = "pwm-controller";
+    constexpr char WEB_REALM[] = "PWM Controller";
+    constexpr uint8_t MIN_WEB_PASSWORD_LENGTH = 8;
+    constexpr uint8_t MAX_WEB_PASSWORD_LENGTH = 64;
+    constexpr uint8_t MAX_WEB_USERNAME_LENGTH = 32;
+    constexpr uint32_t RESTART_DELAY_MS = 1000;
 
-/**
- * @brief 返回 JSON 成功响应
- * @param request 请求对象
- * @param message 成功信息
- */
-static void sendOk(AsyncWebServerRequest *request, const String &message)
-{
-    JsonDocument doc;
-    doc["message"] = message;
-    String json;
-    serializeJson(doc, json);
-    request->send(200, "application/json", json);
-}
+    enum class RestartReason : uint8_t
+    {
+        NONE,
+        RESET_SETTINGS,
+        AUTH_CHANGED
+    };
 
-/**
- * @brief 将设备数据序列化为 JSON 对象
- * @param dev 设备引用
- * @param obj JSON 对象引用
- */
-static void deviceToJson(const Device &dev, JsonObject obj)
-{
-    obj["id"] = dev.config.id;
-    obj["name"] = dev.config.name;
-    obj["pwmPin"] = dev.config.pwmPin;
-    obj["rpmPin"] = dev.config.rpmPin;
-    obj["dutyCycle"] = dev.config.dutyCycle;
-    obj["savedDutyCycle"] = DeviceManager::getSavedDuty(dev.config.id);
-    obj["inverted"] = dev.config.inverted;
-    obj["rpm"] = dev.rpm;
-}
+    std::atomic<RestartReason> restartReason{RestartReason::NONE};
+    std::atomic<uint32_t> restartAt{0};
 
-// ==================== API 路由注册 ====================
+    /** 安排响应发送完成后的延迟重启。 */
+    void scheduleRestart(RestartReason reason)
+    {
+        restartAt.store(millis() + RESTART_DELAY_MS, std::memory_order_relaxed);
+        restartReason.store(reason, std::memory_order_release);
+    }
 
-/**
- * @brief 注册设备相关 API
- */
-static void registerDeviceAPI()
-{
+    /** 验证摘要认证用户名，避免请求头中的特殊字符产生歧义。 */
+    bool isValidWebUsername(const String &username)
+    {
+        if (username.isEmpty() || username.length() > MAX_WEB_USERNAME_LENGTH)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < username.length(); ++i)
+        {
+            const char character = username[i];
+            const bool valid = (character >= 'a' && character <= 'z') ||
+                               (character >= 'A' && character <= 'Z') ||
+                               (character >= '0' && character <= '9') ||
+                               character == '.' || character == '_' || character == '-';
+            if (!valid)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 
-    // ---- GET /api/devices : 获取所有设备列表 ----
-    server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        const auto& devices = DeviceManager::getDevices();
-
+    /** 发送统一 JSON 消息。 */
+    void sendMessage(AsyncWebServerRequest *request, int code, const String &message)
+    {
         JsonDocument doc;
-        JsonArray arr = doc.to<JsonArray>();
-        for (const auto& dev : devices) {
-            JsonObject obj = arr.add<JsonObject>();
-            deviceToJson(dev, obj);
+        if (code >= 400)
+        {
+            doc["error"] = message;
+        }
+        else
+        {
+            doc["message"] = message;
+        }
+        String body;
+        serializeJson(doc, body);
+        request->send(code, "application/json", body);
+    }
+
+    /** 严格解析 /api/devices/{id}{suffix}。 */
+    bool parseDeviceId(const String &url, const char *suffix, uint8_t &id)
+    {
+        const String prefix = "/api/devices/";
+        if (!url.startsWith(prefix))
+        {
+            return false;
         }
 
-        String json;
-        serializeJson(doc, json);
-        request->send(200, "application/json", json); });
+        String value = url.substring(prefix.length());
+        const String suffixValue = suffix;
+        if (!suffixValue.isEmpty())
+        {
+            if (!value.endsWith(suffixValue))
+            {
+                return false;
+            }
+            value.remove(value.length() - suffixValue.length());
+        }
+        if (value.isEmpty() || value.indexOf('/') >= 0)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < value.length(); ++i)
+        {
+            if (!isDigit(value[i]))
+            {
+                return false;
+            }
+        }
 
-    // ---- POST /api/devices[/...] : 统一处理所有 POST 请求 ----
-    // 注意：ESPAsyncWebServer 的 server.on 是前缀匹配，
-    // /api/devices/save、/api/devices/1/duty 等子路径均会命中此路由，
-    // 因此在回调中通过 URL 精确分发到各自的处理逻辑。
-    server.on("/api/devices", HTTP_POST,
-              // 请求完成回调：处理无 body 的 POST 子路径（如 /api/devices/{id}/save）
-              [](AsyncWebServerRequest *request)
-              {
-                  String url = request->url();
-                  // ---- POST /api/devices/save : 持久化所有设备到 NVS（无 body） ----
-                  if (url == "/api/devices/save")
+        const long parsed = value.toInt();
+        if (parsed <= 0 || parsed > UINT8_MAX)
+        {
+            return false;
+        }
+        id = static_cast<uint8_t>(parsed);
+        return true;
+    }
+
+    /** 读取并验证 JSON 整数。 */
+    bool readInteger(JsonVariantConst json, const char *key, long minimum, long maximum, long &value)
+    {
+        if (!json[key].is<long>())
+        {
+            return false;
+        }
+        value = json[key].as<long>();
+        return value >= minimum && value <= maximum;
+    }
+
+    /** 读取设备配置请求。 */
+    bool readDeviceRequest(JsonVariantConst json, String &name, uint8_t &pwmPin, int8_t &rpmPin,
+                           bool &inverted, uint8_t &pulsesPerRevolution, String &error)
+    {
+        if (!json.is<JsonObjectConst>())
+        {
+            error = "请求必须是 JSON 对象";
+            return false;
+        }
+
+        name = json["name"] | "";
+        name.trim();
+        if (name.isEmpty() || name.length() > 20)
+        {
+            error = "设备名称长度必须为 1～20 个字符";
+            return false;
+        }
+
+        long pwmValue;
+        long rpmValue = -1;
+        long pprValue = DEFAULT_PULSES_PER_REVOLUTION;
+        if (!readInteger(json, "pwmPin", 0, 21, pwmValue))
+        {
+            error = "PWM 引脚格式无效";
+            return false;
+        }
+        if (!json["rpmPin"].isNull() && !readInteger(json, "rpmPin", -1, 21, rpmValue))
+        {
+            error = "转速引脚格式无效";
+            return false;
+        }
+        if (!json["pulsesPerRevolution"].isNull() &&
+            !readInteger(json, "pulsesPerRevolution", MIN_PULSES_PER_REVOLUTION,
+                         MAX_PULSES_PER_REVOLUTION, pprValue))
+        {
+            error = "每转脉冲数必须为 1～8";
+            return false;
+        }
+        if (!json["inverted"].isNull() && !json["inverted"].is<bool>())
+        {
+            error = "反转标志格式无效";
+            return false;
+        }
+
+        pwmPin = static_cast<uint8_t>(pwmValue);
+        rpmPin = static_cast<int8_t>(rpmValue);
+        inverted = json["inverted"] | false;
+        pulsesPerRevolution = static_cast<uint8_t>(pprValue);
+        return true;
+    }
+
+    /** 将状态快照写入 JSON。 */
+    void statusToJson(const DeviceStatus &status, JsonObject object)
+    {
+        object["id"] = status.config.id;
+        object["name"] = status.config.name;
+        object["pwmPin"] = status.config.pwmPin;
+        object["rpmPin"] = status.config.rpmPin;
+        object["dutyCycle"] = status.config.dutyCycle;
+        object["savedDutyCycle"] = status.savedDutyCycle;
+        object["inverted"] = status.config.inverted;
+        object["pulsesPerRevolution"] = status.config.pulsesPerRevolution;
+        object["rpm"] = status.rpm;
+    }
+
+    /** 注册设备 API。 */
+    void registerDeviceAPI()
+    {
+        server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request)
                   {
-                      if (DeviceManager::saveToNVS())
-                      {
-                          sendOk(request, "设备配置已保存");
-                      }
-                      else
-                      {
-                          sendError(request, 500, "保存失败");
-                      }
-                      return;
-                  }
-                  // ---- POST /api/devices/{id}/save : 仅保存该设备占空比到 NVS ----
-                  if (url.endsWith("/save") && url.startsWith("/api/devices/"))
-                  {
-                      String sub = url.substring(13); // {id}/save
-                      uint8_t id = sub.toInt();
-                      if (DeviceManager::saveDutyToNVS(id))
-                      {
-                          sendOk(request, "占空比已保存");
-                      }
-                      else
-                      {
-                          sendError(request, 404, "设备不存在");
-                      }
-                      return;
-                  }
-                  // 其他 POST 请求（有 body）由下方 onBody 回调负责发送响应
-              },
-              nullptr,
-              // onBody 回调：根据 URL 分发到不同的处理逻辑
-              [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-              {
-            String url = request->url();
-
-            // ---- POST /api/devices/{id}/duty : 设置占空比（仅内存） ----
-            if (url.indexOf("/duty") > 0 && url.startsWith("/api/devices/")) {
-                String sub = url.substring(13);  // {id}/duty
-                int slashPos = sub.indexOf('/');
-                if (slashPos < 0) {
-                    sendError(request, 400, "URL 格式错误");
-                    return;
-                }
-                uint8_t id = sub.substring(0, slashPos).toInt();
-
-                JsonDocument doc;
-                DeserializationError err = deserializeJson(doc, data, len);
-                if (err) {
-                    sendError(request, 400, "JSON 解析失败");
-                    return;
-                }
-
-                uint8_t dutyCycle = doc["dutyCycle"] | 0;
-                if (DeviceManager::setDutyCycle(id, dutyCycle)) {
-                    sendOk(request, "占空比已设置");
-                } else {
-                    sendError(request, 404, "设备不存在");
-                }
-                return;
-            }
-
-            // ---- POST /api/devices : 添加新设备 ----
-            if (url != "/api/devices") return;  // 未知子路径则跳过
-
-            JsonDocument doc;
-            DeserializationError err = deserializeJson(doc, data, len);
-            if (err) {
-                sendError(request, 400, "JSON 解析失败");
-                return;
-            }
-
-            String name = doc["name"] | "未命名";
-            uint8_t pwmPin = doc["pwmPin"] | 0;
-            int8_t rpmPin = doc["rpmPin"] | -1;
-            bool inverted = doc["inverted"] | false;
-
-            uint8_t id = DeviceManager::addDevice(name, pwmPin, rpmPin, inverted);
-            if (id == 0) {
-                sendError(request, 500, "添加设备失败");
-                return;
-            }
-
-            // 添加设备后立即持久化到 NVS
-            DeviceManager::saveToNVS();
-
-            // 返回新设备信息
-            JsonDocument respDoc;
-            respDoc["message"] = "设备添加成功";
-            respDoc["id"] = id;
-            String json;
-            serializeJson(respDoc, json);
-            request->send(201, "application/json", json); });
-}
-
-/**
- * @brief 注册需要路径参数的设备 API（使用 onRequestBody）
- *
- * ESPAsyncWebServer 对路径参数的支持有限，
- * 这里使用统一入口解析 URL 中的设备 ID。
- */
-static void registerDeviceParamAPI()
-{
-
-    // 处理 /api/devices/xxx 的统一回调（仅处理 PUT 请求）
-    // 注意：POST /api/devices/{id}/duty 已在 registerDeviceAPI 中处理
-    server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-                         {
-        String url = request->url();
-
-        // ---- PUT /api/devices/{id} : 更新设备配置 ----
-        if (request->method() == HTTP_PUT && url.startsWith("/api/devices/")) {
-            String idStr = url.substring(13);  // 截取 /api/devices/ 之后的部分
-            uint8_t id = idStr.toInt();
-
-            JsonDocument doc;
-            DeserializationError err = deserializeJson(doc, data, len);
-            if (err) {
-                sendError(request, 400, "JSON 解析失败");
-                return;
-            }
-
-            String name = doc["name"] | "";
-            uint8_t pwmPin = doc["pwmPin"] | 0;
-            int8_t rpmPin = doc["rpmPin"] | -1;
-            bool inverted = doc["inverted"] | false;
-
-            if (DeviceManager::updateDevice(id, name, pwmPin, rpmPin, inverted)) {
-                sendOk(request, "设备已更新");
-            } else {
-                sendError(request, 404, "设备不存在");
-            }
-        } });
-
-    // ---- DELETE /api/devices/{id} : 删除设备 ----
-    // DELETE 请求通常无 body，使用普通路由匹配
-    server.onNotFound([](AsyncWebServerRequest *request)
-                      {
-        String url = request->url();
-
-        if (request->method() == HTTP_DELETE && url.startsWith("/api/devices/")) {
-            String idStr = url.substring(13);
-            uint8_t id = idStr.toInt();
-
-            if (DeviceManager::removeDevice(id)) {
-                // 删除后立即持久化到 NVS，防止重启后设备复现
-                DeviceManager::saveToNVS();
-                sendOk(request, "设备已删除");
-            } else {
-                sendError(request, 404, "设备不存在");
-            }
+        if (request->url() != "/api/devices") {
+            sendMessage(request, 404, "未找到");
             return;
         }
+        std::vector<DeviceStatus> statuses;
+        DeviceManager::getStatuses(statuses);
+        JsonDocument doc;
+        JsonArray array = doc.to<JsonArray>();
+        for (const auto &status : statuses) {
+            statusToJson(status, array.add<JsonObject>());
+        }
+        String body;
+        serializeJson(doc, body);
+        request->send(200, "application/json", body); });
 
-        // 其他未匹配的请求返回 404
-        sendError(request, 404, "未找到"); });
-}
+        // 无 body 的全量保存必须先于 /api/devices 前缀 JSON 处理器注册。
+        server.on("/api/devices/save", HTTP_POST, [](AsyncWebServerRequest *request)
+                  {
+        if (request->url() != "/api/devices/save") {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        if (DeviceManager::saveToNVS()) {
+            sendMessage(request, 200, "全部设备配置已保存");
+        } else {
+            sendMessage(request, 500, "NVS 保存失败");
+        } });
 
-/**
- * @brief 注册 WiFi 相关 API
- */
-static void registerWiFiAPI()
-{
+        auto *postJsonHandler = new AsyncCallbackJsonWebHandler(
+            "/api/devices", [](AsyncWebServerRequest *request, JsonVariant &json)
+            {
+            const String url = request->url();
+            if (url == "/api/devices") {
+                String name;
+                String error;
+                uint8_t pwmPin;
+                int8_t rpmPin;
+                bool inverted;
+                uint8_t ppr;
+                if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr, error)) {
+                    sendMessage(request, 400, error);
+                    return;
+                }
+                const uint8_t id = DeviceManager::addDevice(name, pwmPin, rpmPin, inverted, ppr, error);
+                if (id == 0) {
+                    sendMessage(request, 409, error);
+                    return;
+                }
+                JsonDocument response;
+                response["message"] = "设备添加成功";
+                response["id"] = id;
+                String body;
+                serializeJson(response, body);
+                request->send(201, "application/json", body);
+                return;
+            }
 
-    // ---- GET /api/wifi : 获取 WiFi 配置 ----
-    server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-        WiFiConfig config = ConfigManager::loadWiFiConfig();
+            uint8_t id;
+            if (!parseDeviceId(url, "/duty", id)) {
+                sendMessage(request, 404, "未找到");
+                return;
+            }
+            long duty;
+            if (!readInteger(json, "dutyCycle", 0, 100, duty)) {
+                sendMessage(request, 400, "占空比必须为 0～100 的整数");
+                return;
+            }
+            String error;
+            if (!DeviceManager::setDutyCycle(id, static_cast<uint8_t>(duty), error)) {
+                sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+                return;
+            }
+            sendMessage(request, 200, "占空比已设置"); });
+        postJsonHandler->setMethod(HTTP_POST);
+        server.addHandler(postJsonHandler);
 
+        // 无 body 的单设备占空比保存；JSON duty 请求会优先命中上方处理器。
+        server.on("/api/devices/*", HTTP_POST, [](AsyncWebServerRequest *request)
+                  {
+        uint8_t id;
+        if (!parseDeviceId(request->url(), "/save", id)) {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        String error;
+        if (!DeviceManager::saveDutyToNVS(id, error)) {
+            sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+            return;
+        }
+        sendMessage(request, 200, "占空比已保存"); });
+
+        auto *putJsonHandler = new AsyncCallbackJsonWebHandler(
+            "/api/devices", [](AsyncWebServerRequest *request, JsonVariant &json)
+            {
+            uint8_t id;
+            if (!parseDeviceId(request->url(), "", id)) {
+                sendMessage(request, 404, "未找到");
+                return;
+            }
+            String name;
+            String error;
+            uint8_t pwmPin;
+            int8_t rpmPin;
+            bool inverted;
+            uint8_t ppr;
+            if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr, error)) {
+                sendMessage(request, 400, error);
+                return;
+            }
+            if (!DeviceManager::updateDevice(id, name, pwmPin, rpmPin, inverted, ppr, error)) {
+                sendMessage(request, error == "设备不存在" ? 404 : 409, error);
+                return;
+            }
+            sendMessage(request, 200, "设备已更新并保存"); });
+        putJsonHandler->setMethod(HTTP_PUT);
+        server.addHandler(putJsonHandler);
+
+        server.on("/api/devices/*", HTTP_DELETE, [](AsyncWebServerRequest *request)
+                  {
+        uint8_t id;
+        if (!parseDeviceId(request->url(), "", id)) {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        String error;
+        if (!DeviceManager::removeDevice(id, error)) {
+            sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+            return;
+        }
+        sendMessage(request, 200, "设备已删除"); });
+    }
+
+    /** 注册 WiFi API。 */
+    void registerWiFiAPI()
+    {
+        server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *request)
+                  {
+        if (request->url() != "/api/wifi") {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        const WiFiConfig config = ConfigManager::loadWiFiConfig();
         JsonDocument doc;
         doc["ssid"] = config.ssid;
         doc["isAP"] = WiFiManager::isAPMode();
         doc["ip"] = WiFiManager::getIP();
-        // 不返回密码，安全考虑
-        String json;
-        serializeJson(doc, json);
-        request->send(200, "application/json", json); });
+        doc["state"] = WiFiManager::getState();
+        doc["apSsid"] = WiFiManager::getAPSSID();
+        String body;
+        serializeJson(doc, body);
+        request->send(200, "application/json", body); });
 
-    // ---- POST /api/wifi : 更新 WiFi 配置并重连 ----
-    server.on("/api/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {}, nullptr, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-              {
-            JsonDocument doc;
-            DeserializationError err = deserializeJson(doc, data, len);
-            if (err) {
-                sendError(request, 400, "JSON 解析失败");
+        auto *wifiJsonHandler = new AsyncCallbackJsonWebHandler(
+            "/api/wifi", [](AsyncWebServerRequest *request, JsonVariant &json)
+            {
+            if (request->url() != "/api/wifi" || !json.is<JsonObjectConst>()) {
+                sendMessage(request, 400, "请求格式错误");
                 return;
             }
-
-            WiFiConfig config;
-            config.ssid = doc["ssid"] | "";
-            config.password = doc["password"] | "";
-
-            if (config.ssid.isEmpty()) {
-                sendError(request, 400, "SSID 不能为空");
+            const String ssid = json["ssid"] | "";
+            const String password = json["password"] | "";
+            if (ssid.isEmpty() || ssid.length() > 32 || password.length() > 64) {
+                sendMessage(request, 400, "SSID 或密码长度无效");
                 return;
             }
+            if (!WiFiManager::requestConnect(ssid, password)) {
+                sendMessage(request, 500, "无法启动 WiFi 连接");
+                return;
+            }
+            sendMessage(request, 202, "正在后台验证新 WiFi，救援 AP 将保持开启"); });
+        wifiJsonHandler->setMethod(HTTP_POST);
+        server.addHandler(wifiJsonHandler);
+    }
 
-            // 保存到 NVS
-            ConfigManager::saveWiFiConfig(config);
-
-            // 先返回响应，再尝试重连（异步）
-            sendOk(request, "WiFi 配置已保存，正在重连...");
-
-            // 延迟重连，确保响应发送完成
-            // 注意：实际重连会在 main loop 中触发，或使用定时器
-            // 这里简单延迟后重连
-            delay(1000);
-            WiFiManager::connect(config.ssid, config.password); });
-}
-
-/**
- * @brief 注册系统信息 API
- */
-static void registerSystemAPI()
-{
-
-    // ---- GET /api/system/info : 获取系统信息 ----
-    server.on("/api/system/info", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
+    /** 注册系统信息 API。 */
+    void registerSystemAPI()
+    {
+        server.on("/api/system/info", HTTP_GET, [](AsyncWebServerRequest *request)
+                  {
+        if (request->url() != "/api/system/info") {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
         JsonDocument doc;
         doc["ip"] = WiFiManager::getIP();
         doc["isAP"] = WiFiManager::isAPMode();
-        doc["uptime"] = millis() / 1000;  // 运行时间（秒）
+        doc["wifiState"] = WiFiManager::getState();
+        doc["uptime"] = millis() / 1000;
         doc["freeHeap"] = ESP.getFreeHeap();
         doc["chipModel"] = ESP.getChipModel();
+        doc["version"] = PROJECT_VERSION;
+        String body;
+        serializeJson(doc, body);
+        request->send(200, "application/json", body); });
 
-        String json;
-        serializeJson(doc, json);
-        request->send(200, "application/json", json); });
-}
+        server.on("/api/system/reset", HTTP_POST, [](AsyncWebServerRequest *request)
+                  {
+        if (request->url() != "/api/system/reset") {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        if (!ConfigManager::clearAll()) {
+            sendMessage(request, 500, "清空 NVS 失败");
+            return;
+        }
+        scheduleRestart(RestartReason::RESET_SETTINGS);
+        sendMessage(request, 200, "设置已清空，设备即将重启"); });
+    }
 
-// ==================== 模块接口实现 ====================
+    /** 注册 Web 登录认证配置 API。 */
+    void registerWebAuthAPI()
+    {
+        server.on("/api/system/auth", HTTP_GET, [](AsyncWebServerRequest *request)
+                  {
+        if (request->url() != "/api/system/auth") {
+            sendMessage(request, 404, "未找到");
+            return;
+        }
+        JsonDocument doc;
+        doc["username"] = authentication.username();
+        String body;
+        serializeJson(doc, body);
+        request->send(200, "application/json", body); });
+
+        auto *authJsonHandler = new AsyncCallbackJsonWebHandler(
+            "/api/system/auth", [](AsyncWebServerRequest *request, JsonVariant &json)
+            {
+            if (request->url() != "/api/system/auth" || !json.is<JsonObjectConst>()) {
+                sendMessage(request, 400, "请求格式错误");
+                return;
+            }
+
+            String username = json["username"] | "";
+            const String password = json["password"] | "";
+            username.trim();
+            if (!isValidWebUsername(username)) {
+                sendMessage(request, 400, "用户名只能包含 1～32 位字母、数字、点、下划线或连字符");
+                return;
+            }
+            if (password.length() < MIN_WEB_PASSWORD_LENGTH ||
+                password.length() > MAX_WEB_PASSWORD_LENGTH) {
+                sendMessage(request, 400, "密码长度必须为 8～64 位");
+                return;
+            }
+
+            const String passwordHash = generateDigestHash(username.c_str(), password.c_str(), WEB_REALM);
+            if (passwordHash.length() != 32) {
+                sendMessage(request, 500, "登录密码哈希生成失败");
+                return;
+            }
+            if (!ConfigManager::saveWebAuthConfig({username, passwordHash})) {
+                sendMessage(request, 500, "登录配置保存失败");
+                return;
+            }
+
+            scheduleRestart(RestartReason::AUTH_CHANGED);
+            sendMessage(request, 200, "登录配置已保存，设备即将重启"); });
+        authJsonHandler->setMethod(HTTP_POST);
+        server.addHandler(authJsonHandler);
+    }
+} // namespace
 
 void WebServer::init()
 {
     Serial.println("[Web] Web 服务器模块初始化");
+    const bool fsReady = LittleFS.begin(false);
+    Serial.println(fsReady ? "[Web] LittleFS 挂载成功" : "[Web] LittleFS 挂载失败，未自动格式化");
 
-    // 初始化 LittleFS 文件系统
-    if (!LittleFS.begin(true))
+    // 全站使用摘要认证；NVS 未配置时使用默认登录凭据。
+    const WebAuthConfig savedAuth = ConfigManager::loadWebAuthConfig();
+    const String authUsername = savedAuth.username.isEmpty() ? DEFAULT_WEB_USERNAME : savedAuth.username;
+    String authPasswordHash = savedAuth.passwordHash;
+    if (authPasswordHash.isEmpty())
     {
-        Serial.println("[Web] LittleFS 挂载失败!");
-    }
-    else
-    {
-        Serial.println("[Web] LittleFS 挂载成功");
+        authPasswordHash = generateDigestHash(DEFAULT_WEB_USERNAME, DEFAULT_WEB_PASSWORD, WEB_REALM);
     }
 
-    // 注册 API 路由
+    authentication.setUsername(authUsername.c_str());
+    authentication.setPasswordHash(authPasswordHash.c_str());
+    authentication.setRealm(WEB_REALM);
+    authentication.setAuthFailureMessage("需要管理员认证");
+    authentication.setAuthType(AsyncAuthType::AUTH_DIGEST);
+    if (!authentication.hasCredentials())
+    {
+        Serial.println("[Web] 摘要认证初始化失败");
+    }
+    server.addMiddleware(&authentication);
+
     registerDeviceAPI();
     registerWiFiAPI();
     registerSystemAPI();
-    registerDeviceParamAPI(); // 放在最后（包含 onNotFound）
+    registerWebAuthAPI();
 
-    // 注册静态资源服务（LittleFS 根目录映射到 /）
-    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+    if (fsReady)
+    {
+        server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+    }
 
-    // 允许跨域请求（开发调试用）
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    // 启动服务器
+    server.onNotFound([](AsyncWebServerRequest *request)
+                      { sendMessage(request, 404, "未找到"); });
     server.begin();
-    Serial.printf("[Web] 服务器已启动，端口: %d\n", WEB_SERVER_PORT);
+    Serial.printf("[Web] 服务器已启动，端口=%u\n", WEB_SERVER_PORT);
+}
+
+void WebServer::update()
+{
+    const RestartReason reason = restartReason.load(std::memory_order_acquire);
+    if (reason == RestartReason::NONE)
+    {
+        return;
+    }
+
+    const uint32_t scheduledAt = restartAt.load(std::memory_order_relaxed);
+    if (static_cast<int32_t>(millis() - scheduledAt) >= 0)
+    {
+        restartReason.store(RestartReason::NONE, std::memory_order_relaxed);
+        Serial.println(reason == RestartReason::RESET_SETTINGS
+                           ? "[System] NVS 已清空，正在重启"
+                           : "[System] 登录配置已更新，正在重启");
+        Serial.flush();
+        ESP.restart();
+    }
 }

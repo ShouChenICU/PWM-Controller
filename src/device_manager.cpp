@@ -1,457 +1,720 @@
 /**
  * @file device_manager.cpp
- * @brief 设备管理模块实现
- *
- * 管理设备列表、PWM 输出控制和转速读取。
- * 使用 ESP32 LEDC 外设输出 PWM，使用 GPIO 中断统计转速脉冲。
+ * @brief PWM 与转速设备管理模块实现
  */
 
 #include "device_manager.h"
-#include "config_manager.h"
+#include <algorithm>
+#include <memory>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
-// ==================== 内部数据 ====================
-
-/// 设备列表（运行时数据）
-static std::vector<Device> devices;
-
-/// 下一个可用的 PWM 通道号
-static uint8_t nextChannel = 0;
-
-// ==================== 中断服务程序 ====================
-
-/**
- * @brief 转速脉冲中断回调表
- *
- * ESP32 的 GPIO 中断需要 C 风格的函数指针，
- * 这里为每个可能的转速设备创建独立的 ISR。
- * 通过查找表将中断回调映射到对应的设备。
- */
-
-/// 用于 ISR 的设备指针数组（最多 MAX_RPM_DEVICES 个）
-static Device *rpmDevicePtrs[MAX_RPM_DEVICES] = {nullptr};
-static uint8_t rpmDeviceCount = 0;
-
-/**
- * @brief ISR 内计算相邻有效脉冲间隔并写入环形缓冲区
- *
- * 去抖/抗混叠策略：
- *   - lastEdgeTime 在每次中断触发时始终更新，此举显著为关键：
- *     若仅在脉冲通过过滤时才更新，高频噪声（如 25kHz PWM 泄漏）
- *     会在 ~DEBOUNCE_US 后积累成假的“有效间隔”，产生混叠假读数。
- *   - 始终更新后，连续噪声的每个边沿只看到 ~40μs，永远被拒绝。
- *   - lastValidTime 单独追踪最近一次通过去抖的脉冲，用于计算真实周期。
- */
-#define DEFINE_RPM_ISR(idx)                                 \
-    static void IRAM_ATTR rpmISR_##idx()                    \
-    {                                                       \
-        Device *d = rpmDevicePtrs[idx];                     \
-        if (!d)                                             \
-            return;                                         \
-        uint32_t now = micros();                            \
-        if (now == 0)                                       \
-            now = 1; /* 避免与哨兵值 0 混淆 */              \
-        /* 去抖：距上次任意边沿太近则丢弃 */                \
-        if (d->lastEdgeTime != 0)                           \
-        {                                                   \
-            uint32_t sinceEdge = now - d->lastEdgeTime;     \
-            d->lastEdgeTime = now; /* 始终更新，防混叠 */   \
-            if (sinceEdge < RPM_DEBOUNCE_US)                \
-                return;                                     \
-        }                                                   \
-        else                                                \
-        {                                                   \
-            d->lastEdgeTime = now;                          \
-        }                                                   \
-        /* 通过去抖，视为有效脉冲 */                        \
-        if (d->lastValidTime != 0)                          \
-        {                                                   \
-            uint32_t period = now - d->lastValidTime;       \
-            uint32_t pos =                                  \
-                d->pulseWriteCount % RPM_PULSE_BUFFER_SIZE; \
-            d->pulsePeriods[pos] = period;                  \
-            d->pulseWriteCount++;                           \
-        }                                                   \
-        d->lastValidTime = now;                             \
-    }
-
-// 定义 8 个 ISR（对应最多 8 个转速设备）
-DEFINE_RPM_ISR(0)
-DEFINE_RPM_ISR(1)
-DEFINE_RPM_ISR(2)
-DEFINE_RPM_ISR(3)
-DEFINE_RPM_ISR(4)
-DEFINE_RPM_ISR(5)
-DEFINE_RPM_ISR(6)
-DEFINE_RPM_ISR(7)
-
-/// ISR 函数指针表
-static void (*rpmISRTable[MAX_RPM_DEVICES])() = {
-    rpmISR_0, rpmISR_1, rpmISR_2, rpmISR_3,
-    rpmISR_4, rpmISR_5, rpmISR_6, rpmISR_7};
-
-// ==================== 内部辅助函数 ====================
-
-/**
- * @brief 初始化单个设备的 PWM 输出
- * @param dev 设备引用
- */
-static void initPWM(Device &dev)
+namespace
 {
-    dev.pwmChannel = nextChannel++;
+    std::vector<std::unique_ptr<Device>> devices;
+    SemaphoreHandle_t devicesMutex = nullptr;
+    portMUX_TYPE rpmMux = portMUX_INITIALIZER_UNLOCKED;
 
-    // 配置 LEDC 通道
-    ledcAttach(dev.config.pwmPin, PWM_FREQUENCY, PWM_RESOLUTION);
-
-    // 设置初始占空比（将百分比映射到 0-255）
-    uint8_t effectiveDuty = dev.config.inverted ? (100 - dev.config.dutyCycle) : dev.config.dutyCycle;
-    uint32_t duty = map(effectiveDuty, 0, 100, 0, 255);
-    ledcWrite(dev.config.pwmPin, duty);
-
-    Serial.printf("[Device] PWM 初始化: pin=%d, channel=%d, duty=%d%%, inverted=%s\n",
-                  dev.config.pwmPin, dev.pwmChannel, dev.config.dutyCycle, dev.config.inverted ? "是" : "否");
-}
-
-/**
- * @brief 初始化单个设备的转速读取
- * @param dev 设备引用
- */
-static void initRPM(Device &dev)
-{
-    if (dev.config.rpmPin < 0)
-        return;
-    if (rpmDeviceCount >= MAX_RPM_DEVICES)
+    /** 自动获取和释放设备互斥锁。 */
+    class DeviceLock
     {
-        Serial.printf("[Device] 转速设备数量已满，无法为 pin=%d 注册中断\n", dev.config.rpmPin);
-        return;
-    }
-
-    // 配置引脚为输入上拉
-    pinMode(dev.config.rpmPin, INPUT_PULLUP);
-
-    // 注册中断
-    uint8_t idx = rpmDeviceCount;
-    rpmDevicePtrs[idx] = &dev;
-    dev.pulseWriteCount = 0;
-    dev.lastEdgeTime = 0;
-    dev.lastValidTime = 0;
-    memset((void *)dev.pulsePeriods, 0, sizeof(dev.pulsePeriods));
-    dev.rpmEma = 0.0f;
-    dev.rpm = 0;
-    attachInterrupt(digitalPinToInterrupt(dev.config.rpmPin), rpmISRTable[idx], FALLING);
-    rpmDeviceCount++;
-
-    Serial.printf("[Device] 转速读取初始化: pin=%d, ISR索引=%d\n", dev.config.rpmPin, idx);
-}
-
-/**
- * @brief 停止单个设备的 PWM 和中断
- * @param dev 设备引用
- */
-static void deinitDevice(Device &dev)
-{
-    // 先将占空比置 0，使引脚输出低电平
-    ledcWrite(dev.config.pwmPin, 0);
-
-    // 停止 PWM 并重置 GPIO 状态
-    ledcDetach(dev.config.pwmPin);
-    pinMode(dev.config.pwmPin, INPUT);
-
-    // 解除转速中断
-    if (dev.config.rpmPin >= 0)
-    {
-        detachInterrupt(digitalPinToInterrupt(dev.config.rpmPin));
-        // 从 ISR 表中移除
-        for (uint8_t i = 0; i < rpmDeviceCount; i++)
+    public:
+        DeviceLock() : locked(devicesMutex && xSemaphoreTake(devicesMutex, portMAX_DELAY) == pdTRUE) {}
+        ~DeviceLock()
         {
-            if (rpmDevicePtrs[i] == &dev)
+            if (locked)
             {
-                rpmDevicePtrs[i] = nullptr;
-                break;
+                xSemaphoreGive(devicesMutex);
             }
         }
-    }
+        explicit operator bool() const { return locked; }
 
-    Serial.printf("[Device] 设备已停止: id=%d\n", dev.config.id);
-}
+    private:
+        bool locked;
+    };
 
-// ==================== 模块接口实现 ====================
-
-void DeviceManager::init()
+/** DevKitM-1 上允许用于 PWM 输出的 GPIO。 */
+bool isAllowedPwmPin(int pin)
 {
-    Serial.println("[Device] 设备管理模块初始化");
-
-    // 从 NVS 加载设备配置
-    std::vector<DeviceConfig> configs = ConfigManager::loadDevices();
-
-    // 初始化各设备
-    for (auto &cfg : configs)
-    {
-        Device dev;
-        dev.config = cfg;
-        dev.rpm = 0;
-        dev.pulseWriteCount = 0;
-        dev.lastEdgeTime = 0;
-        dev.lastValidTime = 0;
-        dev.rpmEma = 0.0f;
-        dev.pwmChannel = 0;
-
-        devices.push_back(dev);
-    }
-
-    // 初始化 PWM 和转速读取（在 push_back 之后，地址稳定）
-    for (auto &dev : devices)
-    {
-        initPWM(dev);
-        initRPM(dev);
-    }
-
-    Serial.printf("[Device] 共加载 %d 个设备\n", devices.size());
-}
-
-/**
- * @brief 对小数组进行插入排序（用于中位值滤波）
- * @param arr 数组指针
- * @param n 元素数量
- */
-static void insertionSort(uint32_t *arr, uint8_t n)
-{
-    for (uint8_t i = 1; i < n; i++)
-    {
-        uint32_t key = arr[i];
-        int8_t j = (int8_t)i - 1;
-        while (j >= 0 && arr[j] > key)
+    // GPIO8 虽连接板载 RGB LED，但仍可作为普通 GPIO 使用。
+    // GPIO9 影响下载模式，GPIO20/21 用于串口，GPIO11～17 未安全引出。
+    static const uint8_t ALLOWED_PINS[] = {0, 1, 3, 4, 5, 6, 7, 8, 10, 18, 19};
+    for (uint8_t allowed : ALLOWED_PINS)
         {
-            arr[j + 1] = arr[j];
-            j--;
-        }
-        arr[j + 1] = key;
-    }
-}
-
-void DeviceManager::update()
-{
-    // 限制更新频率，避免每次 loop 都计算
-    static uint32_t lastUpdateMs = 0;
-    uint32_t nowMs = millis();
-    if (nowMs - lastUpdateMs < RPM_UPDATE_INTERVAL_MS)
-        return;
-    lastUpdateMs = nowMs;
-
-    uint32_t nowUs = micros();
-
-    for (auto &dev : devices)
-    {
-        if (dev.config.rpmPin < 0)
-            continue;
-
-        // 原子读取脉冲间隔缓冲区副本
-        noInterrupts();
-        uint32_t writeCount = dev.pulseWriteCount;
-        uint32_t lastValid = dev.lastValidTime;
-        uint32_t periods[RPM_PULSE_BUFFER_SIZE];
-        memcpy(periods, (const void *)dev.pulsePeriods, sizeof(periods));
-        interrupts();
-
-        uint16_t rawRpm = 0;
-
-        if (lastValid == 0 || writeCount == 0)
-        {
-            // 从未收到有效脉冲间隔
-            rawRpm = 0;
-        }
-        else if ((nowUs - lastValid) > RPM_STALL_TIMEOUT_US)
-        {
-            // 超时，风扇已停止（或信号全是噪声无法解读）
-            rawRpm = 0;
-        }
-        else
-        {
-            // 取缓冲区中有效的间隔数量
-            uint8_t count = (writeCount < RPM_PULSE_BUFFER_SIZE)
-                                ? (uint8_t)writeCount
-                                : RPM_PULSE_BUFFER_SIZE;
-
-            // 复制有效数据并排序（中位值滤波）
-            uint32_t sorted[RPM_PULSE_BUFFER_SIZE];
-            memcpy(sorted, periods, count * sizeof(uint32_t));
-            insertionSort(sorted, count);
-
-            // 取中位值：对称地取中间元素，拒绝离群值干扰
-            uint32_t medianPeriod = sorted[count / 2];
-
-            if (medianPeriod > 0)
+            if (pin == allowed)
             {
-                uint16_t calcRpm = (uint16_t)(60000000UL / ((uint32_t)PULSES_PER_REVOLUTION * medianPeriod));
-                // 合法性钳位：超过上限视为噪声
-                rawRpm = (calcRpm <= RPM_MAX_VALID) ? calcRpm : 0;
+                return true;
             }
         }
-
-        // EMA 平滑：风扇停止时立刻归零，首次有效读数直接赋值避免从 0 慢慢爬升
-        if (rawRpm == 0)
-        {
-            dev.rpmEma = 0.0f;
-        }
-        else if (dev.rpmEma < 1.0f)
-        {
-            dev.rpmEma = (float)rawRpm;
-        }
-        else
-        {
-            dev.rpmEma = RPM_EMA_ALPHA * (float)rawRpm + (1.0f - RPM_EMA_ALPHA) * dev.rpmEma;
-        }
-
-        dev.rpm = (uint16_t)(dev.rpmEma + 0.5f); // 四舍五入
-    }
+    return false;
 }
 
-const std::vector<Device> &DeviceManager::getDevices()
+/** DevKitM-1 上允许用于 RPM 输入的 GPIO。 */
+bool isAllowedRpmPin(int pin)
 {
-    return devices;
-}
-
-Device *DeviceManager::findDevice(uint8_t id)
-{
-    for (auto &dev : devices)
+    // GPIO2 仅作为带上拉的输入使用；GPIO8 可能导致板载 RGB LED 闪烁。
+    static const uint8_t ALLOWED_PINS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 18, 19};
+    for (uint8_t allowed : ALLOWED_PINS)
     {
-        if (dev.config.id == id)
+        if (pin == allowed)
         {
-            return &dev;
-        }
-    }
-    return nullptr;
-}
-
-uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted)
-{
-    if (devices.size() >= MAX_DEVICE_COUNT)
-    {
-        Serial.println("[Device] 设备数量已达上限");
-        return 0;
-    }
-
-    // 获取下一个 ID
-    std::vector<DeviceConfig> configs;
-    for (const auto &d : devices)
-    {
-        configs.push_back(d.config);
-    }
-
-    Device dev;
-    dev.config.id = ConfigManager::nextDeviceId(configs);
-    dev.config.name = name;
-    dev.config.pwmPin = pwmPin;
-    dev.config.rpmPin = rpmPin;
-    dev.config.dutyCycle = DEFAULT_DUTY_CYCLE;
-    dev.config.inverted = inverted;
-    dev.rpm = 0;
-    dev.pulseWriteCount = 0;
-    dev.lastEdgeTime = 0;
-    dev.lastValidTime = 0;
-    dev.rpmEma = 0.0f;
-    dev.pwmChannel = 0;
-
-    devices.push_back(dev);
-
-    // 初始化新设备
-    Device &newDev = devices.back();
-    initPWM(newDev);
-    initRPM(newDev);
-
-    Serial.printf("[Device] 添加设备: id=%d, name=%s, inverted=%s\n", dev.config.id, name.c_str(), inverted ? "是" : "否");
-    return dev.config.id;
-}
-
-bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin, bool inverted)
-{
-    Device *dev = findDevice(id);
-    if (!dev)
-        return false;
-
-    // 先停止旧的 PWM/中断
-    deinitDevice(*dev);
-
-    // 更新配置
-    dev->config.name = name;
-    dev->config.pwmPin = pwmPin;
-    dev->config.rpmPin = rpmPin;
-    dev->config.inverted = inverted;
-
-    // 重新初始化
-    initPWM(*dev);
-    initRPM(*dev);
-
-    Serial.printf("[Device] 更新设备: id=%d, name=%s, inverted=%s\n", id, name.c_str(), inverted ? "是" : "否");
-    return true;
-}
-
-bool DeviceManager::removeDevice(uint8_t id)
-{
-    for (auto it = devices.begin(); it != devices.end(); ++it)
-    {
-        if (it->config.id == id)
-        {
-            deinitDevice(*it);
-            devices.erase(it);
-            Serial.printf("[Device] 删除设备: id=%d\n", id);
             return true;
         }
     }
     return false;
 }
 
-bool DeviceManager::setDutyCycle(uint8_t id, uint8_t dutyCycle)
-{
-    Device *dev = findDevice(id);
-    if (!dev)
+    /** 根据 ID 查找设备，调用者必须持有 devicesMutex。 */
+    Device *findDeviceLocked(uint8_t id)
+    {
+        for (auto &device : devices)
+        {
+            if (device->config.id == id)
+            {
+                return device.get();
+            }
+        }
+        return nullptr;
+    }
+
+    /** 验证配置与引脚冲突，ignoreId 用于更新现有设备。 */
+    bool validateConfigLocked(const DeviceConfig &config, uint8_t ignoreId, String &error)
+    {
+        if (config.id == 0)
+        {
+            error = "设备 ID 无效";
+            return false;
+        }
+        if (config.name.isEmpty() || config.name.length() > 20)
+        {
+            error = "设备名称长度必须为 1～20 个字符";
+            return false;
+        }
+    if (!isAllowedPwmPin(config.pwmPin))
+    {
+        error = "PWM 引脚不可用，请使用 GPIO0、1、3～8、10、18 或 19";
         return false;
+    }
+    if (config.rpmPin >= 0 && !isAllowedRpmPin(config.rpmPin))
+    {
+        error = "转速引脚不可用，请使用 GPIO0～8、10、18 或 19（不含 GPIO9）";
+            return false;
+        }
+        if (config.rpmPin >= 0 && config.rpmPin == config.pwmPin)
+        {
+            error = "PWM 与转速引脚不能相同";
+            return false;
+        }
+        if (config.dutyCycle > 100)
+        {
+            error = "占空比必须为 0～100";
+            return false;
+        }
+        if (config.pulsesPerRevolution < MIN_PULSES_PER_REVOLUTION ||
+            config.pulsesPerRevolution > MAX_PULSES_PER_REVOLUTION)
+        {
+            error = "每转脉冲数必须为 1～8";
+            return false;
+        }
 
-    // 限制范围 0-100
-    dutyCycle = min(dutyCycle, (uint8_t)100);
-    dev->config.dutyCycle = dutyCycle;
+        for (const auto &device : devices)
+        {
+            if (device->config.id == ignoreId)
+            {
+                continue;
+            }
+            if (device->config.id == config.id)
+            {
+                error = "设备 ID 重复";
+                return false;
+            }
 
-    // 更新 PWM 输出（百分比映射到 0-255）
-    uint8_t effectiveDuty = dev->config.inverted ? (100 - dutyCycle) : dutyCycle;
-    uint32_t duty = map(effectiveDuty, 0, 100, 0, 255);
-    ledcWrite(dev->config.pwmPin, duty);
+            const int existingPins[] = {device->config.pwmPin, device->config.rpmPin};
+            const int newPins[] = {config.pwmPin, config.rpmPin};
+            for (int newPin : newPins)
+            {
+                if (newPin < 0)
+                {
+                    continue;
+                }
+                for (int existingPin : existingPins)
+                {
+                    if (newPin == existingPin)
+                    {
+                        error = String("GPIO") + newPin + " 已被其他设备占用";
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
 
-    Serial.printf("[Device] 设置占空比: id=%d, duty=%d%% (有效=%d%%)\n", id, dutyCycle, effectiveDuty);
+    /** 将逻辑占空比写入 PWM。 */
+    bool applyDuty(Device &device, uint8_t logicalDuty)
+    {
+        const uint8_t effectiveDuty = device.config.inverted ? 100 - logicalDuty : logicalDuty;
+        const uint32_t rawDuty = map(effectiveDuty, 0, 100, 0, 255);
+        return ledcWrite(device.config.pwmPin, rawDuty);
+    }
+
+    /** 初始化 PWM，失败时不保留半初始化状态。 */
+    bool initPWM(Device &device)
+    {
+        if (!ledcAttach(device.config.pwmPin, PWM_FREQUENCY, PWM_RESOLUTION))
+        {
+            Serial.printf("[Device] PWM 初始化失败: pin=%u\n", device.config.pwmPin);
+            return false;
+        }
+        device.pwmAttached = true;
+        if (!applyDuty(device, device.config.dutyCycle))
+        {
+            ledcDetach(device.config.pwmPin);
+            device.pwmAttached = false;
+            Serial.printf("[Device] PWM 初始占空比写入失败: pin=%u\n", device.config.pwmPin);
+            return false;
+        }
+
+        Serial.printf("[Device] PWM 初始化: pin=%u, duty=%u%%, inverted=%s\n",
+                      device.config.pwmPin, device.config.dutyCycle,
+                      device.config.inverted ? "是" : "否");
+        return true;
+    }
+
+    /** RPM 下降沿 ISR：持续高频噪声会被全部拒绝，避免混叠成虚假转速。 */
+    void IRAM_ATTR rpmISR(void *argument)
+    {
+        Device *device = static_cast<Device *>(argument);
+        if (!device)
+        {
+            return;
+        }
+
+        uint32_t now = micros();
+        if (now == 0)
+        {
+            now = 1;
+        }
+
+        portENTER_CRITICAL_ISR(&rpmMux);
+        if (device->lastEdgeTime != 0)
+        {
+            const uint32_t sinceEdge = now - device->lastEdgeTime;
+            device->lastEdgeTime = now;
+            if (sinceEdge < device->minimumPulsePeriodUs)
+            {
+                portEXIT_CRITICAL_ISR(&rpmMux);
+                return;
+            }
+        }
+        else
+        {
+            device->lastEdgeTime = now;
+        }
+
+        if (device->lastValidTime != 0)
+        {
+            const uint32_t period = now - device->lastValidTime;
+            const uint32_t position = device->pulseWriteCount % RPM_PULSE_BUFFER_SIZE;
+            device->pulsePeriods[position] = period;
+            device->pulseWriteCount = device->pulseWriteCount + 1U;
+        }
+        device->lastValidTime = now;
+        portEXIT_CRITICAL_ISR(&rpmMux);
+    }
+
+    /** 清空 RPM 采样状态。 */
+    void resetRpmState(Device &device)
+    {
+        portENTER_CRITICAL(&rpmMux);
+        device.pulseWriteCount = 0;
+        device.lastEdgeTime = 0;
+        device.lastValidTime = 0;
+        memset((void *)device.pulsePeriods, 0, sizeof(device.pulsePeriods));
+        portEXIT_CRITICAL(&rpmMux);
+        device.rpm = 0;
+        device.rpmEma = 0.0f;
+    }
+
+    /** 初始化转速中断。 */
+    void initRPM(Device &device)
+    {
+        // 阈值按 PPR 预计算，既拒绝超过合法转速的毛刺，也不压掉高 PPR 有效脉冲。
+        device.minimumPulsePeriodUs =
+            60000000UL /
+            (static_cast<uint32_t>(device.config.pulsesPerRevolution) * RPM_MAX_VALID);
+        resetRpmState(device);
+        if (device.config.rpmPin < 0)
+        {
+            device.rpmAttached = false;
+            return;
+        }
+
+        pinMode(device.config.rpmPin, INPUT_PULLUP);
+        attachInterruptArg(device.config.rpmPin, rpmISR, &device, FALLING);
+        device.rpmAttached = true;
+        Serial.printf("[Device] 转速读取初始化: pin=%d, ppr=%u\n",
+                      device.config.rpmPin, device.config.pulsesPerRevolution);
+    }
+
+    /** 停止设备；PWM 先切到风扇全速的故障安全状态，再释放引脚。 */
+    void deinitDevice(Device &device)
+    {
+        if (device.rpmAttached && device.config.rpmPin >= 0)
+        {
+            detachInterrupt(device.config.rpmPin);
+            device.rpmAttached = false;
+            pinMode(device.config.rpmPin, INPUT);
+        }
+
+        if (device.pwmAttached)
+        {
+            applyDuty(device, 100);
+            ledcDetach(device.config.pwmPin);
+            device.pwmAttached = false;
+            pinMode(device.config.pwmPin, INPUT);
+        }
+        resetRpmState(device);
+    }
+
+    /** 提取持久化配置；currentDuty=false 时保留各设备上次保存的占空比。 */
+    std::vector<DeviceConfig> extractConfigsLocked(bool currentDuty)
+    {
+        std::vector<DeviceConfig> configs;
+        configs.reserve(devices.size());
+        for (const auto &device : devices)
+        {
+            DeviceConfig config = device->config;
+            if (!currentDuty)
+            {
+                config.dutyCycle = device->savedDutyCycle;
+            }
+            configs.push_back(config);
+        }
+        return configs;
+    }
+
+    /** 小数组插入排序。 */
+    void insertionSort(uint32_t *values, uint8_t count)
+    {
+        for (uint8_t i = 1; i < count; ++i)
+        {
+            const uint32_t key = values[i];
+            int8_t j = static_cast<int8_t>(i) - 1;
+            while (j >= 0 && values[j] > key)
+            {
+                values[j + 1] = values[j];
+                --j;
+            }
+            values[j + 1] = key;
+        }
+    }
+} // namespace
+
+void DeviceManager::init()
+{
+    devicesMutex = xSemaphoreCreateMutex();
+    if (!devicesMutex)
+    {
+        Serial.println("[Device] 创建设备互斥锁失败");
+        return;
+    }
+
+    DeviceLock lock;
+    if (!lock)
+    {
+        return;
+    }
+
+    const std::vector<DeviceConfig> configs = ConfigManager::loadDevices();
+    for (const auto &config : configs)
+    {
+        if (devices.size() >= MAX_DEVICE_COUNT)
+        {
+            Serial.println("[Device] 超出硬件上限的配置已保留在 NVS，但本次不启用");
+            break;
+        }
+
+        String error;
+        if (!validateConfigLocked(config, 0, error))
+        {
+            Serial.printf("[Device] 跳过无效配置 id=%u: %s\n", config.id, error.c_str());
+            continue;
+        }
+
+        auto device = std::make_unique<Device>();
+        device->config = config;
+        device->savedDutyCycle = config.dutyCycle;
+        device->pwmAttached = false;
+        device->rpmAttached = false;
+        resetRpmState(*device);
+        if (!initPWM(*device))
+        {
+            Serial.printf("[Device] 配置 id=%u 初始化失败，NVS 数据保持不变\n", config.id);
+            continue;
+        }
+        initRPM(*device);
+        devices.push_back(std::move(device));
+    }
+
+    Serial.printf("[Device] 共加载 %u 个设备\n", static_cast<unsigned>(devices.size()));
+}
+
+void DeviceManager::update()
+{
+    static uint32_t lastUpdateMs = 0;
+    const uint32_t nowMs = millis();
+    if (nowMs - lastUpdateMs < RPM_UPDATE_INTERVAL_MS)
+    {
+        return;
+    }
+    lastUpdateMs = nowMs;
+
+    DeviceLock lock;
+    if (!lock)
+    {
+        return;
+    }
+
+    const uint32_t nowUs = micros();
+    for (auto &devicePtr : devices)
+    {
+        Device &device = *devicePtr;
+        if (!device.rpmAttached || device.config.rpmPin < 0)
+        {
+            continue;
+        }
+
+        uint32_t writeCount;
+        uint32_t lastValid;
+        uint32_t periods[RPM_PULSE_BUFFER_SIZE];
+        portENTER_CRITICAL(&rpmMux);
+        writeCount = device.pulseWriteCount;
+        lastValid = device.lastValidTime;
+        memcpy(periods, (const void *)device.pulsePeriods, sizeof(periods));
+        portEXIT_CRITICAL(&rpmMux);
+
+        if (lastValid != 0 && nowUs - lastValid > RPM_STALL_TIMEOUT_US)
+        {
+            // 停转后清除旧样本，防止再次启动时复用历史转速。
+            resetRpmState(device);
+            continue;
+        }
+
+        const uint8_t count = writeCount < RPM_PULSE_BUFFER_SIZE
+                                  ? static_cast<uint8_t>(writeCount)
+                                  : RPM_PULSE_BUFFER_SIZE;
+        if (count < RPM_MIN_STARTUP_SAMPLES)
+        {
+            device.rpm = 0;
+            device.rpmEma = 0.0f;
+            continue;
+        }
+
+        const uint32_t minimumPeriod = device.minimumPulsePeriodUs;
+        uint32_t validPeriods[RPM_PULSE_BUFFER_SIZE];
+        uint8_t validCount = 0;
+        for (uint8_t i = 0; i < count; ++i)
+        {
+            if (periods[i] >= minimumPeriod && periods[i] <= RPM_STALL_TIMEOUT_US)
+            {
+                validPeriods[validCount++] = periods[i];
+            }
+        }
+
+        if (validCount < RPM_MIN_STARTUP_SAMPLES)
+        {
+            device.rpm = 0;
+            device.rpmEma = 0.0f;
+            continue;
+        }
+
+        insertionSort(validPeriods, validCount);
+        uint32_t medianPeriod;
+        if ((validCount & 1U) == 0)
+        {
+            medianPeriod = static_cast<uint32_t>(
+                (static_cast<uint64_t>(validPeriods[validCount / 2 - 1]) +
+                 validPeriods[validCount / 2]) /
+                2ULL);
+        }
+        else
+        {
+            medianPeriod = validPeriods[validCount / 2];
+        }
+
+        const uint64_t denominator =
+            static_cast<uint64_t>(device.config.pulsesPerRevolution) * medianPeriod;
+        const uint32_t calculatedRpm = denominator == 0 ? 0 : 60000000ULL / denominator;
+        const uint16_t rawRpm = calculatedRpm <= RPM_MAX_VALID
+                                    ? static_cast<uint16_t>(calculatedRpm)
+                                    : 0;
+
+        if (rawRpm == 0)
+        {
+            device.rpmEma = 0.0f;
+        }
+        else if (device.rpmEma < 1.0f)
+        {
+            device.rpmEma = rawRpm;
+        }
+        else
+        {
+            device.rpmEma = RPM_EMA_ALPHA * rawRpm +
+                            (1.0f - RPM_EMA_ALPHA) * device.rpmEma;
+        }
+        device.rpm = static_cast<uint16_t>(device.rpmEma + 0.5f);
+    }
+}
+
+void DeviceManager::getStatuses(std::vector<DeviceStatus> &statuses)
+{
+    statuses.clear();
+    DeviceLock lock;
+    if (!lock)
+    {
+        return;
+    }
+
+    statuses.reserve(devices.size());
+    for (const auto &device : devices)
+    {
+        statuses.push_back({device->config, device->savedDutyCycle, device->rpm});
+    }
+}
+
+uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin,
+                                 bool inverted, uint8_t pulsesPerRevolution, String &error)
+{
+    DeviceLock lock;
+    if (!lock)
+    {
+        error = "设备管理器不可用";
+        return 0;
+    }
+    if (devices.size() >= MAX_DEVICE_COUNT)
+    {
+        error = "ESP32-C3 最多支持 6 路独立 PWM";
+        return 0;
+    }
+
+    const std::vector<DeviceConfig> currentConfigs = extractConfigsLocked(false);
+    DeviceConfig config;
+    config.id = ConfigManager::nextDeviceId(currentConfigs);
+    config.name = name;
+    config.pwmPin = pwmPin;
+    config.rpmPin = rpmPin;
+    config.dutyCycle = DEFAULT_DUTY_CYCLE;
+    config.inverted = inverted;
+    config.pulsesPerRevolution = pulsesPerRevolution;
+
+    if (!validateConfigLocked(config, 0, error))
+    {
+        return 0;
+    }
+
+    auto device = std::make_unique<Device>();
+    device->config = config;
+    device->savedDutyCycle = config.dutyCycle;
+    device->pwmAttached = false;
+    device->rpmAttached = false;
+    resetRpmState(*device);
+    if (!initPWM(*device))
+    {
+        error = "PWM 通道分配失败";
+        return 0;
+    }
+    initRPM(*device);
+    devices.push_back(std::move(device));
+
+    if (!ConfigManager::saveDevices(extractConfigsLocked(false)))
+    {
+        deinitDevice(*devices.back());
+        devices.pop_back();
+        error = "NVS 保存失败，添加操作已回滚";
+        return 0;
+    }
+
+    Serial.printf("[Device] 添加设备: id=%u, name=%s\n", config.id, config.name.c_str());
+    return config.id;
+}
+
+bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin,
+                                 bool inverted, uint8_t pulsesPerRevolution, String &error)
+{
+    DeviceLock lock;
+    if (!lock)
+    {
+        error = "设备管理器不可用";
+        return false;
+    }
+
+    Device *device = findDeviceLocked(id);
+    if (!device)
+    {
+        error = "设备不存在";
+        return false;
+    }
+
+    const DeviceConfig oldConfig = device->config;
+    DeviceConfig newConfig = oldConfig;
+    newConfig.name = name;
+    newConfig.pwmPin = pwmPin;
+    newConfig.rpmPin = rpmPin;
+    newConfig.inverted = inverted;
+    newConfig.pulsesPerRevolution = pulsesPerRevolution;
+    if (!validateConfigLocked(newConfig, id, error))
+    {
+        return false;
+    }
+
+    deinitDevice(*device);
+    device->config = newConfig;
+    if (!initPWM(*device))
+    {
+        device->config = oldConfig;
+        initPWM(*device);
+        initRPM(*device);
+        error = "新 PWM 配置初始化失败，已恢复旧配置";
+        return false;
+    }
+    initRPM(*device);
+
+    if (!ConfigManager::saveDevices(extractConfigsLocked(false)))
+    {
+        deinitDevice(*device);
+        device->config = oldConfig;
+        initPWM(*device);
+        initRPM(*device);
+        error = "NVS 保存失败，更新操作已回滚";
+        return false;
+    }
+
+    Serial.printf("[Device] 更新设备: id=%u, name=%s\n", id, name.c_str());
+    return true;
+}
+
+bool DeviceManager::removeDevice(uint8_t id, String &error)
+{
+    DeviceLock lock;
+    if (!lock)
+    {
+        error = "设备管理器不可用";
+        return false;
+    }
+
+    auto iterator = std::find_if(devices.begin(), devices.end(),
+                                 [id](const std::unique_ptr<Device> &device)
+                                 { return device->config.id == id; });
+    if (iterator == devices.end())
+    {
+        error = "设备不存在";
+        return false;
+    }
+
+    std::vector<DeviceConfig> remainingConfigs;
+    remainingConfigs.reserve(devices.size() - 1);
+    for (const auto &device : devices)
+    {
+        if (device->config.id != id)
+        {
+            DeviceConfig config = device->config;
+            config.dutyCycle = device->savedDutyCycle;
+            remainingConfigs.push_back(config);
+        }
+    }
+    if (!ConfigManager::saveDevices(remainingConfigs))
+    {
+        error = "NVS 保存失败，未删除设备";
+        return false;
+    }
+
+    deinitDevice(**iterator);
+    devices.erase(iterator);
+    Serial.printf("[Device] 删除设备: id=%u\n", id);
+    return true;
+}
+
+bool DeviceManager::setDutyCycle(uint8_t id, uint8_t dutyCycle, String &error)
+{
+    if (dutyCycle > 100)
+    {
+        error = "占空比必须为 0～100";
+        return false;
+    }
+
+    DeviceLock lock;
+    if (!lock)
+    {
+        error = "设备管理器不可用";
+        return false;
+    }
+    Device *device = findDeviceLocked(id);
+    if (!device)
+    {
+        error = "设备不存在";
+        return false;
+    }
+    if (!applyDuty(*device, dutyCycle))
+    {
+        error = "PWM 写入失败";
+        return false;
+    }
+
+    device->config.dutyCycle = dutyCycle;
     return true;
 }
 
 bool DeviceManager::saveToNVS()
 {
-    // 提取设备配置列表
+    DeviceLock lock;
+    if (!lock)
+    {
+        return false;
+    }
+    if (!ConfigManager::saveDevices(extractConfigsLocked(true)))
+    {
+        return false;
+    }
+    for (auto &device : devices)
+    {
+        device->savedDutyCycle = device->config.dutyCycle;
+    }
+    return true;
+}
+
+bool DeviceManager::saveDutyToNVS(uint8_t id, String &error)
+{
+    DeviceLock lock;
+    if (!lock)
+    {
+        error = "设备管理器不可用";
+        return false;
+    }
+    Device *target = findDeviceLocked(id);
+    if (!target)
+    {
+        error = "设备不存在";
+        return false;
+    }
+
     std::vector<DeviceConfig> configs;
-    for (const auto &dev : devices)
+    configs.reserve(devices.size());
+    for (const auto &device : devices)
     {
-        configs.push_back(dev.config);
-    }
-    return ConfigManager::saveDevices(configs);
-}
-
-bool DeviceManager::saveDutyToNVS(uint8_t id)
-{
-    // 遍历设备列表，找到目标设备及其在列表中的位置（即 NVS 索引）
-    for (size_t i = 0; i < devices.size(); i++)
-    {
-        if (devices[i].config.id == id)
+        DeviceConfig config = device->config;
+        if (device.get() != target)
         {
-            return ConfigManager::saveOneDevice(static_cast<uint8_t>(i), devices[i].config);
+            config.dutyCycle = device->savedDutyCycle;
         }
+        configs.push_back(config);
     }
-    Serial.printf("[Device] saveDutyToNVS: 未找到设备 id=%d\n", id);
-    return false;
-}
-
-uint8_t DeviceManager::getSavedDuty(uint8_t id)
-{
-    for (size_t i = 0; i < devices.size(); i++)
+    if (!ConfigManager::saveDevices(configs))
     {
-        if (devices[i].config.id == id)
-        {
-            return ConfigManager::getSavedDuty(static_cast<uint8_t>(i), devices[i].config.dutyCycle);
-        }
+        error = "NVS 保存失败";
+        return false;
     }
-    return 0;
+
+    target->savedDutyCycle = target->config.dutyCycle;
+    return true;
 }

@@ -12,20 +12,18 @@
 
 // ==================== 常量定义 ====================
 
-/// NVS 命名空间
-static const char *NVS_NAMESPACE = "pwm_ctrl";
-
-/// NVS 键名
-static const char *NVS_KEY_WIFI_SSID = "wifi_ssid";
-static const char *NVS_KEY_WIFI_PASS = "wifi_pass";
-static const char *NVS_KEY_DEV_COUNT = "dev_count";
-static const char *NVS_KEY_DEV_PREFIX = "dev_"; // 设备键前缀，完整键名为 dev_{id}
-
 /// 设备默认占空比 (0-100)
 static const uint8_t DEFAULT_DUTY_CYCLE = 10;
 
-/// 最大设备数量
-static const uint8_t MAX_DEVICE_COUNT = 16;
+/// 最大设备数量（ESP32-C3 LEDC 只有 6 个独立通道）
+static const uint8_t MAX_DEVICE_COUNT = 6;
+
+/// 默认每转脉冲数
+static const uint8_t DEFAULT_PULSES_PER_REVOLUTION = 2;
+
+/// 每转脉冲数允许范围
+static const uint8_t MIN_PULSES_PER_REVOLUTION = 1;
+static const uint8_t MAX_PULSES_PER_REVOLUTION = 8;
 
 // ==================== 数据结构 ====================
 
@@ -44,6 +42,7 @@ struct DeviceConfig
     int8_t rpmPin;     ///< 转速读取引脚（-1 表示无）
     uint8_t dutyCycle; ///< 当前占空比 (0-100)
     bool inverted;     ///< 是否反转 PWM 信号
+    uint8_t pulsesPerRevolution; ///< 转速信号每转脉冲数
 };
 
 /**
@@ -53,6 +52,17 @@ struct WiFiConfig
 {
     String ssid;     ///< WiFi SSID
     String password; ///< WiFi 密码
+};
+
+/**
+ * @brief Web 登录认证配置结构体
+ *
+ * passwordHash 保存摘要认证 HA1 哈希，不在 NVS 中存储明文密码。
+ */
+struct WebAuthConfig
+{
+    String username;     ///< 登录用户名
+    String passwordHash; ///< 摘要认证 HA1 哈希
 };
 
 // ==================== 模块接口 ====================
@@ -82,6 +92,21 @@ namespace ConfigManager
      */
     bool saveWiFiConfig(const WiFiConfig &config);
 
+    // ---------- Web 登录认证 ----------
+
+    /**
+     * @brief 从 NVS 读取 Web 登录认证配置
+     * @return WebAuthConfig 结构体，未配置或数据无效时返回空字符串
+     */
+    WebAuthConfig loadWebAuthConfig();
+
+    /**
+     * @brief 保存 Web 登录认证配置
+     * @param config 用户名与摘要认证哈希
+     * @return true 保存成功，false 保存失败
+     */
+    bool saveWebAuthConfig(const WebAuthConfig &config);
+
     // ---------- 设备配置 ----------
 
     /**
@@ -98,20 +123,10 @@ namespace ConfigManager
     bool saveDevices(const std::vector<DeviceConfig> &devices);
 
     /**
-     * @brief 仅将指定单个设备的配置更新到 NVS（不影响其他设备）
-     * @param nvsIndex 设备在 NVS 中的存储索引（即在设备列表中的位置）
-     * @param config   设备配置
-     * @return true 保存成功，false 保存失败
+     * @brief 清空本项目命名空间内的全部 NVS 配置
+     * @return true 清空成功，false 清空失败
      */
-    bool saveOneDevice(uint8_t nvsIndex, const DeviceConfig &config);
-
-    /**
-     * @brief 获取指定 NVS 索引下设备已保存的占空比
-     * @param nvsIndex 设备在 NVS 中的索引
-     * @param defaultDuty 默认占空比（如果获取失败）
-     * @return 已保存的占空比 (0-100)
-     */
-    uint8_t getSavedDuty(uint8_t nvsIndex, uint8_t defaultDuty);
+    bool clearAll();
 
     /**
      * @brief 生成下一个可用的设备ID

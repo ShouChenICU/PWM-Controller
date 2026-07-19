@@ -58,6 +58,20 @@ body {
   font-weight: 600;
 }
 
+.header-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.header-version {
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.78);
+  white-space: nowrap;
+}
+
 .header-actions {
   display: flex;
   gap: 8px;
@@ -253,6 +267,11 @@ body {
   background: var(--color-danger-dark);
 }
 
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* ======== 模态弹窗 ======== */
 .modal {
   display: none;
@@ -318,6 +337,7 @@ body {
 
 .modal-footer {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: flex-end;
   padding: 16px 20px;
@@ -513,15 +533,33 @@ body {
 
 /* ======== WiFi 状态 ======== */
 .wifi-status {
-  margin: 12px 0;
+  margin: 0 0 12px;
   padding: 12px;
-  background: var(--color-bg);
+  background: var(--color-card);
   border-radius: 8px;
   font-size: 0.85rem;
 }
 
 .wifi-status .label {
   color: var(--color-text-secondary);
+}
+
+/* ======== 登录设置 ======== */
+.settings-section {
+  margin: 12px 0;
+  padding: 12px;
+  background: var(--color-bg);
+  border-radius: 8px;
+}
+
+.settings-section .form-group:last-of-type {
+  margin-bottom: 8px;
+}
+
+.settings-hint {
+  margin-bottom: 12px;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
 }
 
 /* ======== 系统信息 ======== */
@@ -535,6 +573,19 @@ body {
 
 .system-info p {
   margin-bottom: 4px;
+}
+
+/* ======== 恢复出厂设置 ======== */
+.reset-settings {
+  padding: 12px;
+  border: 1px solid var(--color-danger);
+  border-radius: 8px;
+}
+
+.reset-settings p {
+  margin-bottom: 12px;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
 }
 
 /* ======== 提示消息 ======== */

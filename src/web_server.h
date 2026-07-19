@@ -26,4 +26,7 @@ namespace WebServer
      */
     void init();
 
+    /** 处理延迟重启等 Web 后台任务，在主循环调用。 */
+    void update();
+
 } // namespace WebServer

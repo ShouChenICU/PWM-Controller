@@ -33,8 +33,8 @@ void setup()
   //    缺少 PWM 信号而进入异常状态（如全速或失控）
   DeviceManager::init();
 
-  // 3. 初始化 WiFi（自动尝试 STA，失败回退 AP）
-  //    STA 连接可能阻塞数秒，PWM 已提前输出，设备状态正常
+  // 3. 初始化 WiFi（立即启动救援 AP，并异步尝试 STA）
+  //    连接过程不阻塞，PWM 和 Web 服务可立即开始工作
   WiFiManager::init();
 
   // 4. 初始化并启动 Web 服务器
@@ -47,6 +47,15 @@ void setup()
 
 void loop()
 {
+  // 推进非阻塞 WiFi 连接与断线恢复状态机
+  WiFiManager::update();
+
   // 周期性更新设备状态（转速计算等）
   DeviceManager::update();
+
+  // 处理恢复出厂设置后的延迟重启
+  WebServer::update();
+
+  // 主动让出时间片，避免空闲循环占满 CPU
+  delay(1);
 }
