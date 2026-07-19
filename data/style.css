@@ -118,12 +118,20 @@ body {
     transform var(--transition),
     box-shadow var(--transition);
   display: flex;
-  align-items: center;
-  gap: 16px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 .device-card:active {
   transform: scale(0.98);
+}
+
+.device-card-main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 
 /* 设备卡片左侧 - 占空比圆环 */
@@ -196,6 +204,60 @@ body {
   color: var(--color-success);
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* 设备卡片 RPM 趋势图 */
+.device-rpm-chart {
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+.rpm-chart-caption {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 2px;
+  color: var(--color-text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.2;
+}
+
+.rpm-chart-plot {
+  position: relative;
+  height: 60px;
+  margin: 0 4px;
+}
+
+.rpm-chart-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.rpm-chart-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rpm-chart-line {
+  fill: none;
+  stroke: var(--color-success);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.rpm-chart-point {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--color-card);
+  border-radius: 50%;
+  background: var(--color-success);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
 /* ======== 空状态 ======== */

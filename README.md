@@ -1,7 +1,8 @@
 # PWM Controller - 基于 ESP32-C3 的 Web PWM 控制器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/ShouChenICU/PWM-Controller/build.yml?branch=main)](https://github.com/ShouChenICU/PWM-Controller/actions)
+[![Arduino](https://img.shields.io/badge/Arduino-ESP32--C3-00878F?logo=arduino&logoColor=white)](https://www.arduino.cc/)
+[![PlatformIO](https://img.shields.io/badge/PlatformIO-pioarduino-F5822A?logo=platformio&logoColor=white)](https://platformio.org/)
 [![GitHub stars](https://img.shields.io/github/stars/ShouChenICU/PWM-Controller.svg)](https://github.com/ShouChenICU/PWM-Controller/stargazers)
 
 这是一个专为 **ESP32-C3** 设计的开源 PWM 控制器项目。它通过极简的 Web 界面提供友好的交互体验，支持实时调节占空比、查看风扇转速，并管理多个 PWM 设备。特别适合用于 DIY 机箱散热控制、智能家居通风系统等场景。
@@ -9,7 +10,7 @@
 ## ✨ 主要特性
 
 - 🚀 **高性能 PWM**：默认 25kHz 频率，专为 4 线 PC 风扇优化，消除电机啸叫。
-- 📊 **转速监测**：实时读取风扇 Tacho (RPM) 信号。采用按 PPR 动态限频、停转复位、中位值滤波和 EMA 平滑，降低毛刺与历史样本对读数的影响。
+- 📊 **转速监测**：实时读取风扇 Tacho (RPM) 信号。采用按 PPR 动态限频、停转复位、中位值滤波和 EMA 平滑，并在设备卡片展示最近 2 分钟的转速趋势。
 - 🔧 **设备管理**：支持最多 6 路独立 PWM，动态添加、修改、删除并自动校验引脚冲突。
 - 🔄 **信号反转**：支持 PWM 信号反序，适配特殊驱动电路。
 - 💾 **掉电保存**：设备配置与 WiFi 参数持久化存储在 NVS 中。

@@ -34,6 +34,20 @@ let dutyRequestChain = Promise.resolve(true)
 /** 数据刷新间隔（毫秒） */
 const REFRESH_INTERVAL = 2000
 
+/** RPM 趋势图展示窗口（毫秒） */
+const RPM_HISTORY_WINDOW_MS = 2 * 60 * 1000
+
+/** RPM 趋势图逻辑尺寸 */
+const RPM_CHART_WIDTH = 300
+const RPM_CHART_HEIGHT = 60
+
+/** RPM 趋势图纵轴取整步长及最小上限 */
+const RPM_CHART_SCALE_STEP = 500
+const RPM_CHART_MIN_SCALE = 1000
+
+/** 各设备的浏览器端 RPM 历史，刷新页面后重新开始采样 */
+const rpmHistories = new Map()
+
 // ==================== DOM 元素引用 ====================
 
 const $deviceList = document.getElementById('deviceList')
@@ -110,6 +124,7 @@ async function fetchDevices() {
   try {
     const data = await api('/api/devices')
     if (Array.isArray(data)) {
+      updateRpmHistories(data, performance.now())
       devices = data
       // 从后端返回的 savedDutyCycle 更新已保存值缓存
       savedDuties.clear()
@@ -259,6 +274,115 @@ function updateFirmwareVersion(systemInfo) {
   }
 }
 
+/**
+ * 记录一次成功获取的 RPM 快照，并清理过期或已删除设备的数据。
+ * @param {Array<object>} snapshots 设备状态快照
+ * @param {number} sampledAt 采样时间戳
+ */
+function updateRpmHistories(snapshots, sampledAt) {
+  const activeDeviceIds = new Set()
+  const cutoff = sampledAt - RPM_HISTORY_WINDOW_MS
+
+  snapshots.forEach((device) => {
+    if (device.rpmPin < 0) {
+      rpmHistories.delete(device.id)
+      return
+    }
+
+    activeDeviceIds.add(device.id)
+    const parsedRpm = Number(device.rpm)
+    const rpm = Number.isFinite(parsedRpm) ? Math.max(0, parsedRpm) : 0
+    const history = rpmHistories.get(device.id) || []
+    history.push({ timestamp: sampledAt, rpm })
+
+    let firstValidIndex = 0
+    while (
+      firstValidIndex < history.length &&
+      history[firstValidIndex].timestamp < cutoff
+    ) {
+      firstValidIndex++
+    }
+    if (firstValidIndex > 0) {
+      history.splice(0, firstValidIndex)
+    }
+    rpmHistories.set(device.id, history)
+  })
+
+  for (const deviceId of rpmHistories.keys()) {
+    if (!activeDeviceIds.has(deviceId)) {
+      rpmHistories.delete(deviceId)
+    }
+  }
+}
+
+/** 将纵轴上限向上取整，避免折线贴近图表顶部。 */
+function calculateRpmChartScale(history) {
+  const maximumRpm = history.reduce((maximum, sample) => Math.max(maximum, sample.rpm), 0)
+  const paddedMaximum = maximumRpm * 1.1
+  return Math.max(
+    RPM_CHART_MIN_SCALE,
+    Math.ceil(paddedMaximum / RPM_CHART_SCALE_STEP) * RPM_CHART_SCALE_STEP
+  )
+}
+
+/**
+ * 生成设备卡片内的 RPM SVG 趋势图。
+ * @param {object} device 设备状态
+ * @returns {string} 图表 HTML；无转速引脚时返回空字符串
+ */
+function renderRpmChart(device) {
+  if (device.rpmPin < 0) return ''
+
+  const history = rpmHistories.get(device.id) || []
+  if (history.length === 0) return ''
+
+  const chartTop = 4
+  const chartBottom = RPM_CHART_HEIGHT - 3
+  const chartHeight = chartBottom - chartTop
+  const latestTimestamp = history[history.length - 1].timestamp
+  const earliestTimestamp = Math.max(
+    latestTimestamp - RPM_HISTORY_WINDOW_MS,
+    history[0].timestamp
+  )
+  const timeSpan = Math.max(latestTimestamp - earliestTimestamp, 1)
+  const scaleMaximum = calculateRpmChartScale(history)
+
+  const pointCoordinates = history.map((sample) => {
+    const x =
+      history.length === 1
+        ? RPM_CHART_WIDTH / 2
+        : ((sample.timestamp - earliestTimestamp) / timeSpan) * RPM_CHART_WIDTH
+    const boundedRpm = Math.min(sample.rpm, scaleMaximum)
+    const y = chartBottom - (boundedRpm / scaleMaximum) * chartHeight
+    return { x: x.toFixed(1), y: y.toFixed(1) }
+  })
+
+  const points = pointCoordinates.map((point) => `${point.x},${point.y}`).join(' ')
+  const latestPoint = pointCoordinates[pointCoordinates.length - 1]
+  const latestLeft = ((Number(latestPoint.x) / RPM_CHART_WIDTH) * 100).toFixed(2)
+  const latestTop = ((Number(latestPoint.y) / RPM_CHART_HEIGHT) * 100).toFixed(2)
+
+  return `
+    <div class="device-rpm-chart">
+      <div class="rpm-chart-caption">
+        <span>最近 2 分钟</span>
+        <span>0–${scaleMaximum} RPM</span>
+      </div>
+      <div class="rpm-chart-plot">
+        <svg class="rpm-chart-svg" viewBox="0 0 ${RPM_CHART_WIDTH} ${RPM_CHART_HEIGHT}"
+             preserveAspectRatio="none" role="img" aria-label="最近两分钟转速趋势">
+          <line class="rpm-chart-grid" x1="0" y1="${chartTop}" x2="${RPM_CHART_WIDTH}" y2="${chartTop}" />
+          <line class="rpm-chart-grid" x1="0" y1="${((chartTop + chartBottom) / 2).toFixed(1)}"
+                x2="${RPM_CHART_WIDTH}" y2="${((chartTop + chartBottom) / 2).toFixed(1)}" />
+          <line class="rpm-chart-grid" x1="0" y1="${chartBottom}" x2="${RPM_CHART_WIDTH}" y2="${chartBottom}" />
+          <polyline class="rpm-chart-line" points="${points}" />
+        </svg>
+        <span class="rpm-chart-point" style="left:${latestLeft}%;top:${latestTop}%" aria-hidden="true"></span>
+      </div>
+    </div>
+  `
+}
+
 /** 清空 NVS 配置并请求设备重启。 */
 async function resetSettings() {
   const confirmed = confirm(
@@ -301,26 +425,30 @@ function renderDevices() {
 
       // 转速显示
       const rpmHtml = dev.rpmPin >= 0 ? `<span class="device-rpm">${dev.rpm} RPM</span>` : ''
+      const rpmChartHtml = renderRpmChart(dev)
 
       return `
             <div class="device-card" data-id="${dev.id}" onclick="openDeviceDetail(${dev.id})">
-                <div class="device-duty-ring">
-                    <svg width="60" height="60" viewBox="0 0 60 60">
-                        <circle class="ring-bg" cx="30" cy="30" r="${radius}" />
-                        <circle class="ring-fg" cx="30" cy="30" r="${radius}"
-                                stroke-dasharray="${circumference}"
-                                stroke-dashoffset="${offset}" />
-                    </svg>
-                    <span class="device-duty-text">${dev.dutyCycle}%</span>
-                </div>
-                <div class="device-info">
-                    <div class="device-name">${escapeHtml(dev.name)}</div>
-                    <div class="device-meta">
-                        <span>PWM: GPIO${dev.pwmPin}</span>
-                        ${dev.rpmPin >= 0 ? `<span>转速: GPIO${dev.rpmPin}</span>` : ''}
-                        ${rpmHtml}
+                <div class="device-card-main">
+                    <div class="device-duty-ring">
+                        <svg width="60" height="60" viewBox="0 0 60 60">
+                            <circle class="ring-bg" cx="30" cy="30" r="${radius}" />
+                            <circle class="ring-fg" cx="30" cy="30" r="${radius}"
+                                    stroke-dasharray="${circumference}"
+                                    stroke-dashoffset="${offset}" />
+                        </svg>
+                        <span class="device-duty-text">${dev.dutyCycle}%</span>
+                    </div>
+                    <div class="device-info">
+                        <div class="device-name">${escapeHtml(dev.name)}</div>
+                        <div class="device-meta">
+                            <span>PWM: GPIO${dev.pwmPin}</span>
+                            ${dev.rpmPin >= 0 ? `<span>转速: GPIO${dev.rpmPin}</span>` : ''}
+                            ${rpmHtml}
+                        </div>
                     </div>
                 </div>
+                ${rpmChartHtml}
             </div>
         `
     })
