@@ -1,27 +1,35 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, user-scalable=no"
-    />
-    <title>PWM 控制器</title>
-    <link rel="stylesheet" href="style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>PWM Controller</title>
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <!-- 顶部导航栏 -->
     <header class="header">
       <div class="header-brand">
-        <h1 class="header-title">PWM 控制器</h1>
+        <h1 class="header-title" data-i18n="app.title">PWM Controller</h1>
         <span class="header-version" id="firmwareVersion">v--</span>
       </div>
       <div class="header-actions">
         <a
+          href="/zh"
+          class="btn-icon language-switch"
+          id="languageSwitch"
+          lang="zh-CN"
+          title="切换到中文"
+          data-i18n-title="nav.switchLanguage"
+          >中文</a
+        >
+        <a
           href="https://github.com/ShouChenICU/PWM-Controller"
           target="_blank"
+          rel="noopener noreferrer"
           class="btn-icon"
-          title="GitHub 仓库"
+          title="GitHub repository"
+          data-i18n-title="nav.github"
         >
           <svg
             width="24"
@@ -32,13 +40,19 @@
             stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
+            aria-hidden="true"
           >
             <path
               d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"
             ></path>
           </svg>
         </a>
-        <button class="btn-icon" id="btnSettings" title="系统设置">
+        <button
+          class="btn-icon"
+          id="btnSettings"
+          title="System settings"
+          data-i18n-title="nav.settings"
+        >
           <svg
             width="24"
             height="24"
@@ -46,6 +60,7 @@
             fill="none"
             stroke="currentColor"
             stroke-width="2"
+            aria-hidden="true"
           >
             <circle cx="12" cy="12" r="3" />
             <path
@@ -58,214 +73,256 @@
 
     <!-- 主内容区 -->
     <main class="main">
-      <!-- 设备卡片列表 -->
-      <div class="device-list" id="deviceList">
-        <!-- JS 动态渲染 -->
-      </div>
-
-      <!-- 空状态提示 -->
+      <div class="device-list" id="deviceList"></div>
       <div class="empty-state" id="emptyState" style="display: none">
-        <p>暂无设备</p>
-        <p>点击下方按钮添加第一个设备</p>
+        <p data-i18n="empty.title">No devices yet</p>
+        <p data-i18n="empty.hint">Use the button below to add your first device</p>
       </div>
-
-      <!-- 添加设备按钮 -->
-      <button class="btn-add" id="btnAddDevice">+ 添加设备</button>
+      <button class="btn-add" id="btnAddDevice" data-i18n="action.addDevice">+ Add Device</button>
     </main>
 
-    <!-- 提示消息 -->
     <div class="toast" id="toast"></div>
 
-    <!-- ===== 设备详情弹窗 ===== -->
+    <!-- 设备详情弹窗 -->
     <div class="modal" id="modalDeviceDetail">
       <div class="modal-content">
         <div class="modal-header">
-          <h2 id="detailTitle">设备详情</h2>
-          <button class="btn-close" id="btnCloseDetail">&times;</button>
+          <h2 id="detailTitle" data-i18n="detail.title">Device Details</h2>
+          <button
+            class="btn-close"
+            id="btnCloseDetail"
+            aria-label="Close"
+            data-i18n-aria-label="action.close"
+          >
+            &times;
+          </button>
         </div>
         <div class="modal-body">
           <div class="duty-display">
             <div class="duty-current">
               <span class="duty-value" id="detailDutyValue">10</span>
               <span class="duty-unit">%</span>
-              <span class="duty-tag">当前</span>
+              <span class="duty-tag" data-i18n="detail.current">Current</span>
             </div>
             <div class="duty-saved-row">
-              已保存：<span id="detailSavedDutyValue">10</span>%
+              <span data-i18n="detail.saved">Saved:</span>
+              <span id="detailSavedDutyValue">10</span>%
             </div>
           </div>
           <div class="slider-container">
-            <button class="btn-step" id="btnDutyMinus" title="减少 1%">
+            <button
+              class="btn-step"
+              id="btnDutyMinus"
+              title="Decrease by 1%"
+              data-i18n-title="detail.decrease"
+            >
               -
             </button>
-            <input
-              type="range"
-              class="slider"
-              id="detailDutySlider"
-              min="0"
-              max="100"
-              value="10"
-            />
-            <button class="btn-step" id="btnDutyPlus" title="增加 1%">+</button>
+            <input type="range" class="slider" id="detailDutySlider" min="0" max="100" value="10" />
+            <button
+              class="btn-step"
+              id="btnDutyPlus"
+              title="Increase by 1%"
+              data-i18n-title="detail.increase"
+            >
+              +
+            </button>
           </div>
-          <div class="slider-labels">
-            <span>0%</span>
-            <span>50%</span>
-            <span>100%</span>
-          </div>
-
-          <div class="detail-info" id="detailInfo">
-            <!-- 设备引脚信息由 JS 填充 -->
-          </div>
+          <div class="slider-labels"><span>0%</span><span>50%</span><span>100%</span></div>
+          <div class="detail-info" id="detailInfo"></div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-danger" id="btnDeleteDevice">删除设备</button>
-          <button class="btn" id="btnEditDevice">编辑配置</button>
-          <button class="btn btn-primary" id="btnSaveDuty">保存占空比</button>
+          <button class="btn btn-danger" id="btnDeleteDevice" data-i18n="action.deleteDevice">
+            Delete Device
+          </button>
+          <button class="btn" id="btnEditDevice" data-i18n="action.editDevice">
+            Edit Settings
+          </button>
+          <button class="btn btn-primary" id="btnSaveDuty" data-i18n="action.saveDuty">
+            Save Duty Cycle
+          </button>
         </div>
       </div>
     </div>
 
-    <!-- ===== 添加/编辑设备弹窗 ===== -->
+    <!-- 添加或编辑设备弹窗 -->
     <div class="modal" id="modalAddDevice">
       <div class="modal-content">
         <div class="modal-header">
-          <h2 id="addDeviceTitle">添加设备</h2>
-          <button class="btn-close" id="btnCloseAdd">&times;</button>
+          <h2 id="addDeviceTitle" data-i18n="device.addTitle">Add Device</h2>
+          <button
+            class="btn-close"
+            id="btnCloseAdd"
+            aria-label="Close"
+            data-i18n-aria-label="action.close"
+          >
+            &times;
+          </button>
         </div>
         <div class="modal-body">
           <div class="form-group">
-            <label for="inputDeviceName">设备名称</label>
+            <label for="inputDeviceName" data-i18n="device.name">Device Name</label>
             <input
               type="text"
               id="inputDeviceName"
-              placeholder="如：机箱风扇"
               maxlength="20"
+              placeholder="e.g. Case fan"
+              data-i18n-placeholder="device.namePlaceholder"
             />
           </div>
           <div class="form-group">
-            <label for="inputPwmPin">PWM 输出引脚</label>
+            <label for="inputPwmPin" data-i18n="device.pwmPin">PWM Output Pin</label>
             <input
               type="number"
               id="inputPwmPin"
-              placeholder="可用：0,1,3-8,10,18,19"
               min="0"
               max="21"
+              placeholder="Available: 0,1,3-8,10,18,19"
+              data-i18n-placeholder="device.pwmPinPlaceholder"
             />
           </div>
           <div class="form-group">
-            <label for="inputRpmPin">转速读取引脚（可选）</label>
+            <label for="inputRpmPin" data-i18n="device.rpmPin">RPM Input Pin (optional)</label>
             <input
               type="number"
               id="inputRpmPin"
-              placeholder="可用：0-8(不含9),10,18,19"
               min="-1"
               max="21"
+              placeholder="Available: 0-8 (except 9),10,18,19"
+              data-i18n-placeholder="device.rpmPinPlaceholder"
             />
           </div>
           <div class="form-group checkbox-group">
             <input type="checkbox" id="inputInverted" />
-            <label for="inputInverted">外部驱动反相 (10% → 90%)</label>
+            <label for="inputInverted" data-i18n="device.inverted"
+              >External driver inversion (10% → 90%)</label
+            >
           </div>
           <div class="form-group">
-            <label for="inputPulsesPerRevolution">转速信号每转脉冲数</label>
-            <input
-              type="number"
-              id="inputPulsesPerRevolution"
-              min="1"
-              max="8"
-              value="2"
-            />
+            <label for="inputPulsesPerRevolution" data-i18n="device.ppr"
+              >Tach Pulses per Revolution</label
+            >
+            <input type="number" id="inputPulsesPerRevolution" min="1" max="8" value="2" />
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn" id="btnCancelAdd">取消</button>
-          <button class="btn btn-primary" id="btnConfirmAdd">确认添加</button>
+          <button class="btn" id="btnCancelAdd" data-i18n="action.cancel">Cancel</button>
+          <button class="btn btn-primary" id="btnConfirmAdd" data-i18n="action.confirmAdd">
+            Add Device
+          </button>
         </div>
       </div>
     </div>
 
-    <!-- ===== 系统设置弹窗 ===== -->
+    <!-- 系统设置弹窗 -->
     <div class="modal" id="modalSettings">
       <div class="modal-content">
         <div class="modal-header">
-          <h2>系统设置</h2>
-          <button class="btn-close" id="btnCloseSettings">&times;</button>
+          <h2 data-i18n="settings.title">System Settings</h2>
+          <button
+            class="btn-close"
+            id="btnCloseSettings"
+            aria-label="Close"
+            data-i18n-aria-label="action.close"
+          >
+            &times;
+          </button>
         </div>
         <div class="modal-body">
-          <h3>WiFi 配置</h3>
+          <h3 data-i18n="settings.wifi">WiFi Configuration</h3>
           <div class="settings-section">
             <div class="form-group">
-              <label for="inputWifiSsid">WiFi SSID</label>
-              <input type="text" id="inputWifiSsid" placeholder="WiFi 名称" />
+              <label for="inputWifiSsid" data-i18n="settings.wifiSsid">WiFi SSID</label>
+              <input
+                type="text"
+                id="inputWifiSsid"
+                placeholder="WiFi network name"
+                data-i18n-placeholder="settings.wifiSsidPlaceholder"
+              />
             </div>
             <div class="form-group">
-              <label for="inputWifiPass">WiFi 密码</label>
-              <input type="password" id="inputWifiPass" placeholder="WiFi 密码" />
+              <label for="inputWifiPass" data-i18n="settings.wifiPassword">WiFi Password</label>
+              <input
+                type="password"
+                id="inputWifiPass"
+                placeholder="WiFi password"
+                data-i18n-placeholder="settings.wifiPasswordPlaceholder"
+              />
             </div>
-            <div class="wifi-status" id="wifiStatus">
-              <!-- WiFi 状态由 JS 填充 -->
-            </div>
-            <button class="btn btn-primary" id="btnSaveWifi">保存 WiFi</button>
+            <div class="wifi-status" id="wifiStatus"></div>
+            <button class="btn btn-primary" id="btnSaveWifi" data-i18n="settings.saveWifi">
+              Save WiFi
+            </button>
           </div>
 
-          <h3>网页登录</h3>
+          <h3 data-i18n="settings.webLogin">Web Login</h3>
           <div class="settings-section">
             <div class="form-group">
-              <label for="inputWebUsername">登录用户名</label>
+              <label for="inputWebUsername" data-i18n="settings.username">Username</label>
               <input
                 type="text"
                 id="inputWebUsername"
                 maxlength="32"
                 autocomplete="username"
-                placeholder="1～32 位字母、数字、点、下划线或连字符"
+                placeholder="1-32 letters, numbers, dots, underscores, or hyphens"
+                data-i18n-placeholder="settings.usernamePlaceholder"
               />
             </div>
             <div class="form-group">
-              <label for="inputWebPassword">新密码</label>
+              <label for="inputWebPassword" data-i18n="settings.newPassword">New Password</label>
               <input
                 type="password"
                 id="inputWebPassword"
                 minlength="8"
                 maxlength="64"
                 autocomplete="new-password"
-                placeholder="8～64 位"
+                placeholder="8-64 characters"
+                data-i18n-placeholder="settings.passwordPlaceholder"
               />
             </div>
             <div class="form-group">
-              <label for="inputWebPasswordConfirm">确认新密码</label>
+              <label for="inputWebPasswordConfirm" data-i18n="settings.confirmPassword"
+                >Confirm New Password</label
+              >
               <input
                 type="password"
                 id="inputWebPasswordConfirm"
                 minlength="8"
                 maxlength="64"
                 autocomplete="new-password"
-                placeholder="再次输入新密码"
+                placeholder="Enter the new password again"
+                data-i18n-placeholder="settings.confirmPasswordPlaceholder"
               />
             </div>
-            <p class="settings-hint">保存后控制器会重启，请使用新凭据重新登录。</p>
-            <button class="btn btn-primary" id="btnSaveWebAuth">保存登录设置</button>
+            <p class="settings-hint" data-i18n="settings.authHint">
+              The controller will restart after saving. Sign in again with the new credentials.
+            </p>
+            <button class="btn btn-primary" id="btnSaveWebAuth" data-i18n="settings.saveAuth">
+              Save Login Settings
+            </button>
           </div>
 
-          <h3>系统信息</h3>
-          <div class="system-info" id="systemInfo">
-            <!-- 系统信息由 JS 填充 -->
-          </div>
+          <h3 data-i18n="settings.systemInfo">System Information</h3>
+          <div class="system-info" id="systemInfo"></div>
 
-          <h3>恢复出厂设置</h3>
+          <h3 data-i18n="settings.factoryReset">Reset Settings</h3>
           <div class="reset-settings">
-            <p>清空设备列表、WiFi 和网页登录配置，并自动重启控制器。此操作无法撤销。</p>
-            <button class="btn btn-danger" id="btnResetSettings">
-              清空 NVS 并重启
+            <p data-i18n="settings.resetHint">
+              Clear devices, WiFi, and web login settings, then restart the controller. This cannot
+              be undone.
+            </p>
+            <button class="btn btn-danger" id="btnResetSettings" data-i18n="settings.resetButton">
+              Clear NVS and Restart
             </button>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn" id="btnCancelSettings">取消</button>
+          <button class="btn" id="btnCancelSettings" data-i18n="action.cancel">Cancel</button>
         </div>
       </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/app.js"></script>
   </body>
 </html>

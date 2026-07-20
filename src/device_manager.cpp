@@ -33,36 +33,36 @@ namespace
         bool locked;
     };
 
-/** DevKitM-1 上允许用于 PWM 输出的 GPIO。 */
-bool isAllowedPwmPin(int pin)
-{
-    // GPIO8 虽连接板载 RGB LED，但仍可作为普通 GPIO 使用。
-    // GPIO9 影响下载模式，GPIO20/21 用于串口，GPIO11～17 未安全引出。
-    static const uint8_t ALLOWED_PINS[] = {0, 1, 3, 4, 5, 6, 7, 8, 10, 18, 19};
-    for (uint8_t allowed : ALLOWED_PINS)
+    /** DevKitM-1 上允许用于 PWM 输出的 GPIO。 */
+    bool isAllowedPwmPin(int pin)
+    {
+        // GPIO8 虽连接板载 RGB LED，但仍可作为普通 GPIO 使用。
+        // GPIO9 影响下载模式，GPIO20/21 用于串口，GPIO11～17 未安全引出。
+        static const uint8_t ALLOWED_PINS[] = {0, 1, 3, 4, 5, 6, 7, 8, 10, 18, 19};
+        for (uint8_t allowed : ALLOWED_PINS)
         {
             if (pin == allowed)
             {
                 return true;
             }
         }
-    return false;
-}
-
-/** DevKitM-1 上允许用于 RPM 输入的 GPIO。 */
-bool isAllowedRpmPin(int pin)
-{
-    // GPIO2 仅作为带上拉的输入使用；GPIO8 可能导致板载 RGB LED 闪烁。
-    static const uint8_t ALLOWED_PINS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 18, 19};
-    for (uint8_t allowed : ALLOWED_PINS)
-    {
-        if (pin == allowed)
-        {
-            return true;
-        }
+        return false;
     }
-    return false;
-}
+
+    /** DevKitM-1 上允许用于 RPM 输入的 GPIO。 */
+    bool isAllowedRpmPin(int pin)
+    {
+        // GPIO2 仅作为带上拉的输入使用；GPIO8 可能导致板载 RGB LED 闪烁。
+        static const uint8_t ALLOWED_PINS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 18, 19};
+        for (uint8_t allowed : ALLOWED_PINS)
+        {
+            if (pin == allowed)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /** 根据 ID 查找设备，调用者必须持有 devicesMutex。 */
     Device *findDeviceLocked(uint8_t id)
@@ -78,42 +78,42 @@ bool isAllowedRpmPin(int pin)
     }
 
     /** 验证配置与引脚冲突，ignoreId 用于更新现有设备。 */
-    bool validateConfigLocked(const DeviceConfig &config, uint8_t ignoreId, String &error)
+    bool validateConfigLocked(const DeviceConfig &config, uint8_t ignoreId, DeviceError &error)
     {
         if (config.id == 0)
         {
-            error = "设备 ID 无效";
+            error = DeviceError::INVALID_ID;
             return false;
         }
         if (config.name.isEmpty() || config.name.length() > 20)
         {
-            error = "设备名称长度必须为 1～20 个字符";
+            error = DeviceError::INVALID_NAME;
             return false;
         }
-    if (!isAllowedPwmPin(config.pwmPin))
-    {
-        error = "PWM 引脚不可用，请使用 GPIO0、1、3～8、10、18 或 19";
-        return false;
-    }
-    if (config.rpmPin >= 0 && !isAllowedRpmPin(config.rpmPin))
-    {
-        error = "转速引脚不可用，请使用 GPIO0～8、10、18 或 19（不含 GPIO9）";
+        if (!isAllowedPwmPin(config.pwmPin))
+        {
+            error = DeviceError::PWM_PIN_UNAVAILABLE;
+            return false;
+        }
+        if (config.rpmPin >= 0 && !isAllowedRpmPin(config.rpmPin))
+        {
+            error = DeviceError::RPM_PIN_UNAVAILABLE;
             return false;
         }
         if (config.rpmPin >= 0 && config.rpmPin == config.pwmPin)
         {
-            error = "PWM 与转速引脚不能相同";
+            error = DeviceError::PIN_CONFLICT;
             return false;
         }
         if (config.dutyCycle > 100)
         {
-            error = "占空比必须为 0～100";
+            error = DeviceError::INVALID_DUTY;
             return false;
         }
         if (config.pulsesPerRevolution < MIN_PULSES_PER_REVOLUTION ||
             config.pulsesPerRevolution > MAX_PULSES_PER_REVOLUTION)
         {
-            error = "每转脉冲数必须为 1～8";
+            error = DeviceError::INVALID_PULSES_PER_REVOLUTION;
             return false;
         }
 
@@ -125,7 +125,7 @@ bool isAllowedRpmPin(int pin)
             }
             if (device->config.id == config.id)
             {
-                error = "设备 ID 重复";
+                error = DeviceError::DUPLICATE_ID;
                 return false;
             }
 
@@ -141,7 +141,7 @@ bool isAllowedRpmPin(int pin)
                 {
                     if (newPin == existingPin)
                     {
-                        error = String("GPIO") + newPin + " 已被其他设备占用";
+                        error = DeviceError::GPIO_IN_USE;
                         return false;
                     }
                 }
@@ -335,10 +335,11 @@ void DeviceManager::init()
             break;
         }
 
-        String error;
+        DeviceError error = DeviceError::NONE;
         if (!validateConfigLocked(config, 0, error))
         {
-            Serial.printf("[Device] 跳过无效配置 id=%u: %s\n", config.id, error.c_str());
+            Serial.printf("[Device] 跳过无效配置 id=%u: %s\n", config.id,
+                          DeviceManager::getErrorCode(error));
             continue;
         }
 
@@ -484,17 +485,18 @@ void DeviceManager::getStatuses(std::vector<DeviceStatus> &statuses)
 }
 
 uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmPin,
-                                 bool inverted, uint8_t pulsesPerRevolution, String &error)
+                                 bool inverted, uint8_t pulsesPerRevolution, DeviceError &error)
 {
+    error = DeviceError::NONE;
     DeviceLock lock;
     if (!lock)
     {
-        error = "设备管理器不可用";
+        error = DeviceError::MANAGER_UNAVAILABLE;
         return 0;
     }
     if (devices.size() >= MAX_DEVICE_COUNT)
     {
-        error = "ESP32-C3 最多支持 6 路独立 PWM";
+        error = DeviceError::DEVICE_LIMIT_REACHED;
         return 0;
     }
 
@@ -521,7 +523,7 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
     resetRpmState(*device);
     if (!initPWM(*device))
     {
-        error = "PWM 通道分配失败";
+        error = DeviceError::PWM_ATTACH_FAILED;
         return 0;
     }
     initRPM(*device);
@@ -531,7 +533,7 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
     {
         deinitDevice(*devices.back());
         devices.pop_back();
-        error = "NVS 保存失败，添加操作已回滚";
+        error = DeviceError::NVS_ADD_ROLLBACK;
         return 0;
     }
 
@@ -540,19 +542,20 @@ uint8_t DeviceManager::addDevice(const String &name, uint8_t pwmPin, int8_t rpmP
 }
 
 bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin, int8_t rpmPin,
-                                 bool inverted, uint8_t pulsesPerRevolution, String &error)
+                                 bool inverted, uint8_t pulsesPerRevolution, DeviceError &error)
 {
+    error = DeviceError::NONE;
     DeviceLock lock;
     if (!lock)
     {
-        error = "设备管理器不可用";
+        error = DeviceError::MANAGER_UNAVAILABLE;
         return false;
     }
 
     Device *device = findDeviceLocked(id);
     if (!device)
     {
-        error = "设备不存在";
+        error = DeviceError::DEVICE_NOT_FOUND;
         return false;
     }
 
@@ -575,7 +578,7 @@ bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin,
         device->config = oldConfig;
         initPWM(*device);
         initRPM(*device);
-        error = "新 PWM 配置初始化失败，已恢复旧配置";
+        error = DeviceError::PWM_RECONFIGURE_FAILED;
         return false;
     }
     initRPM(*device);
@@ -586,7 +589,7 @@ bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin,
         device->config = oldConfig;
         initPWM(*device);
         initRPM(*device);
-        error = "NVS 保存失败，更新操作已回滚";
+        error = DeviceError::NVS_UPDATE_ROLLBACK;
         return false;
     }
 
@@ -594,12 +597,13 @@ bool DeviceManager::updateDevice(uint8_t id, const String &name, uint8_t pwmPin,
     return true;
 }
 
-bool DeviceManager::removeDevice(uint8_t id, String &error)
+bool DeviceManager::removeDevice(uint8_t id, DeviceError &error)
 {
+    error = DeviceError::NONE;
     DeviceLock lock;
     if (!lock)
     {
-        error = "设备管理器不可用";
+        error = DeviceError::MANAGER_UNAVAILABLE;
         return false;
     }
 
@@ -608,7 +612,7 @@ bool DeviceManager::removeDevice(uint8_t id, String &error)
                                  { return device->config.id == id; });
     if (iterator == devices.end())
     {
-        error = "设备不存在";
+        error = DeviceError::DEVICE_NOT_FOUND;
         return false;
     }
 
@@ -625,7 +629,7 @@ bool DeviceManager::removeDevice(uint8_t id, String &error)
     }
     if (!ConfigManager::saveDevices(remainingConfigs))
     {
-        error = "NVS 保存失败，未删除设备";
+        error = DeviceError::NVS_DELETE_FAILED;
         return false;
     }
 
@@ -635,29 +639,30 @@ bool DeviceManager::removeDevice(uint8_t id, String &error)
     return true;
 }
 
-bool DeviceManager::setDutyCycle(uint8_t id, uint8_t dutyCycle, String &error)
+bool DeviceManager::setDutyCycle(uint8_t id, uint8_t dutyCycle, DeviceError &error)
 {
+    error = DeviceError::NONE;
     if (dutyCycle > 100)
     {
-        error = "占空比必须为 0～100";
+        error = DeviceError::INVALID_DUTY;
         return false;
     }
 
     DeviceLock lock;
     if (!lock)
     {
-        error = "设备管理器不可用";
+        error = DeviceError::MANAGER_UNAVAILABLE;
         return false;
     }
     Device *device = findDeviceLocked(id);
     if (!device)
     {
-        error = "设备不存在";
+        error = DeviceError::DEVICE_NOT_FOUND;
         return false;
     }
     if (!applyDuty(*device, dutyCycle))
     {
-        error = "PWM 写入失败";
+        error = DeviceError::PWM_WRITE_FAILED;
         return false;
     }
 
@@ -683,18 +688,19 @@ bool DeviceManager::saveToNVS()
     return true;
 }
 
-bool DeviceManager::saveDutyToNVS(uint8_t id, String &error)
+bool DeviceManager::saveDutyToNVS(uint8_t id, DeviceError &error)
 {
+    error = DeviceError::NONE;
     DeviceLock lock;
     if (!lock)
     {
-        error = "设备管理器不可用";
+        error = DeviceError::MANAGER_UNAVAILABLE;
         return false;
     }
     Device *target = findDeviceLocked(id);
     if (!target)
     {
-        error = "设备不存在";
+        error = DeviceError::DEVICE_NOT_FOUND;
         return false;
     }
 
@@ -711,10 +717,106 @@ bool DeviceManager::saveDutyToNVS(uint8_t id, String &error)
     }
     if (!ConfigManager::saveDevices(configs))
     {
-        error = "NVS 保存失败";
+        error = DeviceError::NVS_SAVE_FAILED;
         return false;
     }
 
     target->savedDutyCycle = target->config.dutyCycle;
     return true;
+}
+
+const char *DeviceManager::getErrorCode(DeviceError error)
+{
+    switch (error)
+    {
+    case DeviceError::INVALID_ID:
+        return "INVALID_DEVICE_ID";
+    case DeviceError::INVALID_NAME:
+        return "INVALID_DEVICE_NAME";
+    case DeviceError::PWM_PIN_UNAVAILABLE:
+        return "PWM_PIN_UNAVAILABLE";
+    case DeviceError::RPM_PIN_UNAVAILABLE:
+        return "RPM_PIN_UNAVAILABLE";
+    case DeviceError::PIN_CONFLICT:
+        return "PIN_CONFLICT";
+    case DeviceError::INVALID_DUTY:
+        return "INVALID_DUTY_CYCLE";
+    case DeviceError::INVALID_PULSES_PER_REVOLUTION:
+        return "INVALID_PULSES_PER_REVOLUTION";
+    case DeviceError::DUPLICATE_ID:
+        return "DUPLICATE_DEVICE_ID";
+    case DeviceError::GPIO_IN_USE:
+        return "GPIO_IN_USE";
+    case DeviceError::MANAGER_UNAVAILABLE:
+        return "DEVICE_MANAGER_UNAVAILABLE";
+    case DeviceError::DEVICE_LIMIT_REACHED:
+        return "DEVICE_LIMIT_REACHED";
+    case DeviceError::PWM_ATTACH_FAILED:
+        return "PWM_ATTACH_FAILED";
+    case DeviceError::NVS_ADD_ROLLBACK:
+        return "NVS_ADD_ROLLBACK";
+    case DeviceError::DEVICE_NOT_FOUND:
+        return "DEVICE_NOT_FOUND";
+    case DeviceError::PWM_RECONFIGURE_FAILED:
+        return "PWM_RECONFIGURE_FAILED";
+    case DeviceError::NVS_UPDATE_ROLLBACK:
+        return "NVS_UPDATE_ROLLBACK";
+    case DeviceError::NVS_DELETE_FAILED:
+        return "NVS_DELETE_FAILED";
+    case DeviceError::PWM_WRITE_FAILED:
+        return "PWM_WRITE_FAILED";
+    case DeviceError::NVS_SAVE_FAILED:
+        return "NVS_SAVE_FAILED";
+    case DeviceError::NONE:
+        return "NONE";
+    }
+    return "UNKNOWN_DEVICE_ERROR";
+}
+
+const char *DeviceManager::getErrorMessage(DeviceError error)
+{
+    switch (error)
+    {
+    case DeviceError::INVALID_ID:
+        return "The device ID is invalid";
+    case DeviceError::INVALID_NAME:
+        return "The device name must contain 1 to 20 characters";
+    case DeviceError::PWM_PIN_UNAVAILABLE:
+        return "Use GPIO0, 1, 3-8, 10, 18, or 19 for PWM";
+    case DeviceError::RPM_PIN_UNAVAILABLE:
+        return "Use GPIO0-8, 10, 18, or 19 for RPM, excluding GPIO9";
+    case DeviceError::PIN_CONFLICT:
+        return "PWM and RPM pins cannot be the same";
+    case DeviceError::INVALID_DUTY:
+        return "Duty cycle must be from 0 to 100";
+    case DeviceError::INVALID_PULSES_PER_REVOLUTION:
+        return "Pulses per revolution must be from 1 to 8";
+    case DeviceError::DUPLICATE_ID:
+        return "The device ID is already in use";
+    case DeviceError::GPIO_IN_USE:
+        return "A selected GPIO is already used by another device";
+    case DeviceError::MANAGER_UNAVAILABLE:
+        return "The device manager is unavailable";
+    case DeviceError::DEVICE_LIMIT_REACHED:
+        return "ESP32-C3 supports up to 6 independent PWM outputs";
+    case DeviceError::PWM_ATTACH_FAILED:
+        return "Failed to allocate a PWM channel";
+    case DeviceError::NVS_ADD_ROLLBACK:
+        return "Failed to save to NVS; the device was not added";
+    case DeviceError::DEVICE_NOT_FOUND:
+        return "Device not found";
+    case DeviceError::PWM_RECONFIGURE_FAILED:
+        return "The new PWM configuration failed; the previous configuration was restored";
+    case DeviceError::NVS_UPDATE_ROLLBACK:
+        return "Failed to save to NVS; the update was rolled back";
+    case DeviceError::NVS_DELETE_FAILED:
+        return "Failed to save to NVS; the device was not deleted";
+    case DeviceError::PWM_WRITE_FAILED:
+        return "Failed to write the PWM duty cycle";
+    case DeviceError::NVS_SAVE_FAILED:
+        return "Failed to save to NVS";
+    case DeviceError::NONE:
+        return "No error";
+    }
+    return "Unknown device error";
 }

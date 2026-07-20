@@ -7,6 +7,9 @@
 
 // ==================== 全局状态 ====================
 
+/** 当前路径对应的翻译函数。 */
+const { t } = window.I18n
+
 /** 设备列表缓存 */
 let devices = []
 
@@ -75,6 +78,7 @@ const $inputPwmPin = document.getElementById('inputPwmPin')
 const $inputRpmPin = document.getElementById('inputRpmPin')
 const $inputInverted = document.getElementById('inputInverted')
 const $inputPulsesPerRevolution = document.getElementById('inputPulsesPerRevolution')
+const $btnConfirmAdd = document.getElementById('btnConfirmAdd')
 
 // 系统设置弹窗
 const $modalSettings = document.getElementById('modalSettings')
@@ -107,12 +111,13 @@ async function api(url, options = {}) {
     const contentType = resp.headers.get('content-type') || ''
     const data = contentType.includes('application/json') ? await resp.json() : null
     if (!resp.ok) {
-      throw new Error(data?.error || `请求失败 (${resp.status})`)
+      const translatedError = data?.code ? t(`api.${data.code}`, {}, data.error || '') : data?.error
+      throw new Error(translatedError || t('error.requestFailed', { status: resp.status }))
     }
     return data || {}
   } catch (err) {
     console.error('API 请求失败:', url, err)
-    showToast(err.message || '网络请求失败')
+    showToast(err.message || t('error.networkFailed'))
     return null
   }
 }
@@ -161,7 +166,7 @@ async function addDevice(name, pwmPin, rpmPin, inverted, pulsesPerRevolution) {
     })
   })
   if (data && data.id) {
-    showToast('设备添加成功')
+    showToast(t('toast.deviceAdded'))
     await fetchDevices()
   }
   return data
@@ -180,7 +185,7 @@ async function updateDevice(id, name, pwmPin, rpmPin, inverted, pulsesPerRevolut
     })
   })
   if (data) {
-    showToast('设备已更新')
+    showToast(t('toast.deviceUpdated'))
     await fetchDevices()
     return true
   }
@@ -191,7 +196,7 @@ async function updateDevice(id, name, pwmPin, rpmPin, inverted, pulsesPerRevolut
 async function deleteDevice(id) {
   const data = await api(`/api/devices/${id}`, { method: 'DELETE' })
   if (data) {
-    showToast('设备已删除')
+    showToast(t('toast.deviceDeleted'))
     await fetchDevices()
     return true
   }
@@ -218,7 +223,7 @@ async function setDutyCycle(id, dutyCycle) {
 async function saveDevicesToNVS() {
   const data = await api('/api/devices/save', { method: 'POST' })
   if (data) {
-    showToast('设备配置已保存到设备')
+    showToast(t('toast.devicesSaved'))
     // 更新所有设备的已保存占空比为当前实时值
     devices.forEach((dev) => {
       savedDuties.set(dev.id, dev.dutyCycle)
@@ -243,7 +248,7 @@ async function saveWiFiConfig(ssid, password) {
     body: JSON.stringify({ ssid, password })
   })
   if (data) {
-    showToast('正在后台验证新 WiFi...')
+    showToast(t('toast.wifiConnecting'))
     return true
   }
   return false
@@ -296,10 +301,7 @@ function updateRpmHistories(snapshots, sampledAt) {
     history.push({ timestamp: sampledAt, rpm })
 
     let firstValidIndex = 0
-    while (
-      firstValidIndex < history.length &&
-      history[firstValidIndex].timestamp < cutoff
-    ) {
+    while (firstValidIndex < history.length && history[firstValidIndex].timestamp < cutoff) {
       firstValidIndex++
     }
     if (firstValidIndex > 0) {
@@ -340,10 +342,7 @@ function renderRpmChart(device) {
   const chartBottom = RPM_CHART_HEIGHT - 3
   const chartHeight = chartBottom - chartTop
   const latestTimestamp = history[history.length - 1].timestamp
-  const earliestTimestamp = Math.max(
-    latestTimestamp - RPM_HISTORY_WINDOW_MS,
-    history[0].timestamp
-  )
+  const earliestTimestamp = Math.max(latestTimestamp - RPM_HISTORY_WINDOW_MS, history[0].timestamp)
   const timeSpan = Math.max(latestTimestamp - earliestTimestamp, 1)
   const scaleMaximum = calculateRpmChartScale(history)
 
@@ -365,12 +364,12 @@ function renderRpmChart(device) {
   return `
     <div class="device-rpm-chart">
       <div class="rpm-chart-caption">
-        <span>最近 2 分钟</span>
+        <span>${t('chart.recent')}</span>
         <span>0–${scaleMaximum} RPM</span>
       </div>
       <div class="rpm-chart-plot">
         <svg class="rpm-chart-svg" viewBox="0 0 ${RPM_CHART_WIDTH} ${RPM_CHART_HEIGHT}"
-             preserveAspectRatio="none" role="img" aria-label="最近两分钟转速趋势">
+             preserveAspectRatio="none" role="img" aria-label="${t('chart.aria')}">
           <line class="rpm-chart-grid" x1="0" y1="${chartTop}" x2="${RPM_CHART_WIDTH}" y2="${chartTop}" />
           <line class="rpm-chart-grid" x1="0" y1="${((chartTop + chartBottom) / 2).toFixed(1)}"
                 x2="${RPM_CHART_WIDTH}" y2="${((chartTop + chartBottom) / 2).toFixed(1)}" />
@@ -385,9 +384,7 @@ function renderRpmChart(device) {
 
 /** 清空 NVS 配置并请求设备重启。 */
 async function resetSettings() {
-  const confirmed = confirm(
-    '确定要清空全部设备、WiFi 和网页登录配置吗？控制器将自动重启，此操作无法撤销。'
-  )
+  const confirmed = confirm(t('confirm.resetSettings'))
   if (!confirmed) return
 
   const button = document.getElementById('btnResetSettings')
@@ -395,7 +392,7 @@ async function resetSettings() {
   const data = await api('/api/system/reset', { method: 'POST' })
   if (data) {
     if (refreshTimer) clearInterval(refreshTimer)
-    showToast('设置已清空，控制器正在重启...', 5000)
+    showToast(t('toast.settingsReset'), 5000)
     closeModal($modalSettings)
     return
   }
@@ -443,7 +440,7 @@ function renderDevices() {
                         <div class="device-name">${escapeHtml(dev.name)}</div>
                         <div class="device-meta">
                             <span>PWM: GPIO${dev.pwmPin}</span>
-                            ${dev.rpmPin >= 0 ? `<span>转速: GPIO${dev.rpmPin}</span>` : ''}
+                            ${dev.rpmPin >= 0 ? `<span>${t('device.rpmPinShort', { pin: dev.rpmPin })}</span>` : ''}
                             ${rpmHtml}
                         </div>
                     </div>
@@ -481,17 +478,17 @@ function openDeviceDetail(id) {
 
 /** 更新设备详情中的静态配置与实时 RPM。 */
 function renderDetailInfo(dev) {
-  let infoHtml = `<p><strong>设备ID:</strong> ${dev.id}</p>`
-  infoHtml += `<p><strong>PWM 引脚:</strong> GPIO${dev.pwmPin}</p>`
+  let infoHtml = `<p><strong>${t('detail.deviceId')}:</strong> ${dev.id}</p>`
+  infoHtml += `<p><strong>${t('detail.pwmPin')}:</strong> GPIO${dev.pwmPin}</p>`
   if (dev.inverted) {
-    infoHtml += `<p><strong>PWM 信号:</strong> 反转 (10% -> 90%)</p>`
+    infoHtml += `<p><strong>${t('detail.pwmSignal')}:</strong> ${t('detail.inverted')}</p>`
   }
   if (dev.rpmPin >= 0) {
-    infoHtml += `<p><strong>转速引脚:</strong> GPIO${dev.rpmPin}</p>`
-    infoHtml += `<p><strong>每转脉冲:</strong> ${dev.pulsesPerRevolution}</p>`
-    infoHtml += `<p><strong>当前转速:</strong> ${dev.rpm} RPM</p>`
+    infoHtml += `<p><strong>${t('detail.rpmPin')}:</strong> GPIO${dev.rpmPin}</p>`
+    infoHtml += `<p><strong>${t('detail.pulsesPerRevolution')}:</strong> ${dev.pulsesPerRevolution}</p>`
+    infoHtml += `<p><strong>${t('detail.currentRpm')}:</strong> ${dev.rpm} RPM</p>`
   } else {
-    infoHtml += `<p><strong>转速引脚:</strong> 无</p>`
+    infoHtml += `<p><strong>${t('detail.rpmPin')}:</strong> ${t('detail.none')}</p>`
   }
   $detailInfo.innerHTML = infoHtml
 }
@@ -499,7 +496,8 @@ function renderDetailInfo(dev) {
 /** 打开添加设备弹窗 */
 function openAddDevice() {
   editingDeviceId = null
-  $addDeviceTitle.textContent = '添加设备'
+  $addDeviceTitle.textContent = t('device.addTitle')
+  $btnConfirmAdd.textContent = t('action.confirmAdd')
   $inputName.value = ''
   $inputPwmPin.value = ''
   $inputRpmPin.value = ''
@@ -513,7 +511,8 @@ function openEditDevice() {
   const dev = devices.find((item) => item.id === selectedDeviceId)
   if (!dev) return
   editingDeviceId = dev.id
-  $addDeviceTitle.textContent = '编辑设备'
+  $addDeviceTitle.textContent = t('device.editTitle')
+  $btnConfirmAdd.textContent = t('action.confirmEdit')
   $inputName.value = dev.name
   $inputPwmPin.value = dev.pwmPin
   $inputRpmPin.value = dev.rpmPin >= 0 ? dev.rpmPin : ''
@@ -537,10 +536,10 @@ async function openSettings() {
     $inputWifiSsid.value = wifiData.ssid || ''
     $inputWifiPass.value = ''
     $wifiStatus.innerHTML = `
-            <p><span class="label">当前状态:</span> ${wifiData.state === 'connecting' ? '正在连接 STA（救援 AP 保持开启）' : wifiData.isAP ? 'AP 模式（热点）' : 'STA 模式（已连接）'}</p>
-            <p><span class="label">IP 地址:</span> ${wifiData.ip}</p>
-            ${wifiData.isAP ? `<p><span class="label">救援热点:</span> ${escapeHtml(wifiData.apSsid || '-')}</p>` : ''}
-            ${wifiData.ssid ? `<p><span class="label">已配置 SSID:</span> ${escapeHtml(wifiData.ssid)}</p>` : ''}
+            <p><span class="label">${t('wifi.status')}:</span> ${wifiData.state === 'connecting' ? t('wifi.connecting') : wifiData.isAP ? t('wifi.apMode') : t('wifi.staMode')}</p>
+            <p><span class="label">${t('wifi.ipAddress')}:</span> ${wifiData.ip}</p>
+            ${wifiData.isAP ? `<p><span class="label">${t('wifi.rescueAp')}:</span> ${escapeHtml(wifiData.apSsid || '-')}</p>` : ''}
+            ${wifiData.ssid ? `<p><span class="label">${t('wifi.configuredSsid')}:</span> ${escapeHtml(wifiData.ssid)}</p>` : ''}
         `
   }
 
@@ -555,10 +554,10 @@ async function openSettings() {
     const uptimeMin = Math.floor(sysData.uptime / 60)
     const uptimeSec = sysData.uptime % 60
     $systemInfo.innerHTML = `
-            <p><strong>芯片:</strong> ${sysData.chipModel}</p>
-            <p><strong>运行时间:</strong> ${uptimeMin}分${uptimeSec}秒</p>
-            <p><strong>可用内存:</strong> ${(sysData.freeHeap / 1024).toFixed(1)} KB</p>
-            <p><strong>IP 地址:</strong> ${sysData.ip}</p>
+            <p><strong>${t('system.chip')}:</strong> ${sysData.chipModel}</p>
+            <p><strong>${t('system.uptime')}:</strong> ${t('system.uptimeValue', { minutes: uptimeMin, seconds: uptimeSec })}</p>
+            <p><strong>${t('system.freeHeap')}:</strong> ${(sysData.freeHeap / 1024).toFixed(1)} KB</p>
+            <p><strong>${t('system.ipAddress')}:</strong> ${sysData.ip}</p>
         `
   }
 }
@@ -671,7 +670,7 @@ document
   .addEventListener('click', () => closeModal($modalSettings))
 
 /** 确认添加设备 */
-document.getElementById('btnConfirmAdd').addEventListener('click', async () => {
+$btnConfirmAdd.addEventListener('click', async () => {
   const name = $inputName.value.trim()
   const pwmPin = parseInt($inputPwmPin.value)
   const rpmPin = $inputRpmPin.value.trim() === '' ? -1 : parseInt($inputRpmPin.value)
@@ -679,19 +678,19 @@ document.getElementById('btnConfirmAdd').addEventListener('click', async () => {
   const pulsesPerRevolution = parseInt($inputPulsesPerRevolution.value)
 
   if (!name) {
-    showToast('请输入设备名称')
+    showToast(t('validation.deviceName'))
     return
   }
   if (isNaN(pwmPin)) {
-    showToast('请输入有效的 PWM 引脚')
+    showToast(t('validation.pwmPin'))
     return
   }
   if (rpmPin !== -1 && isNaN(rpmPin)) {
-    showToast('请输入有效的转速引脚或留空')
+    showToast(t('validation.rpmPin'))
     return
   }
   if (isNaN(pulsesPerRevolution) || pulsesPerRevolution < 1 || pulsesPerRevolution > 8) {
-    showToast('每转脉冲数必须为 1～8')
+    showToast(t('validation.ppr'))
     return
   }
 
@@ -718,7 +717,7 @@ document.getElementById('btnConfirmAdd').addEventListener('click', async () => {
 /** 删除设备 */
 document.getElementById('btnDeleteDevice').addEventListener('click', async () => {
   if (selectedDeviceId === null) return
-  if (!confirm('确定要删除该设备吗？')) return
+  if (!confirm(t('confirm.deleteDevice'))) return
 
   if (await deleteDevice(selectedDeviceId)) {
     closeModal($modalDetail)
@@ -739,7 +738,7 @@ document.getElementById('btnSaveDuty').addEventListener('click', async () => {
   if (data) {
     savedDuties.set(selectedDeviceId, currentDuty)
     $detailSavedDutyValue.textContent = currentDuty
-    showToast('占空比已保存')
+    showToast(t('toast.dutySaved'))
   }
 })
 
@@ -749,7 +748,7 @@ document.getElementById('btnSaveWifi').addEventListener('click', async () => {
   const password = $inputWifiPass.value
 
   if (!ssid) {
-    showToast('请输入 WiFi SSID')
+    showToast(t('validation.wifiSsid'))
     return
   }
 
@@ -765,15 +764,15 @@ document.getElementById('btnSaveWebAuth').addEventListener('click', async () => 
   const passwordConfirm = $inputWebPasswordConfirm.value
 
   if (!/^[A-Za-z0-9_.-]{1,32}$/.test(username)) {
-    showToast('用户名只能包含 1～32 位字母、数字、点、下划线或连字符')
+    showToast(t('validation.username'))
     return
   }
   if (password.length < 8 || password.length > 64) {
-    showToast('密码长度必须为 8～64 位')
+    showToast(t('validation.password'))
     return
   }
   if (password !== passwordConfirm) {
-    showToast('两次输入的密码不一致')
+    showToast(t('validation.passwordMismatch'))
     return
   }
 
@@ -782,7 +781,7 @@ document.getElementById('btnSaveWebAuth').addEventListener('click', async () => 
   const data = await saveWebAuthConfig(username, password)
   if (data) {
     if (refreshTimer) clearInterval(refreshTimer)
-    showToast('登录设置已保存，控制器正在重启...', 5000)
+    showToast(t('toast.authSaved'), 5000)
     closeModal($modalSettings)
     return
   }

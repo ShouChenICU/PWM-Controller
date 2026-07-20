@@ -70,11 +70,13 @@ namespace
         return true;
     }
 
-    /** 发送统一 JSON 消息。 */
-    void sendMessage(AsyncWebServerRequest *request, int code, const String &message)
+    /** 发送带稳定机器码的统一 JSON 消息。 */
+    void sendMessage(AsyncWebServerRequest *request, int status, const char *messageCode,
+                     const String &message)
     {
         JsonDocument doc;
-        if (code >= 400)
+        doc["code"] = messageCode;
+        if (status >= 400)
         {
             doc["error"] = message;
         }
@@ -84,7 +86,38 @@ namespace
         }
         String body;
         serializeJson(doc, body);
-        request->send(code, "application/json", body);
+        request->send(status, "application/json", body);
+    }
+
+    /** 根据设备错误类别选择 HTTP 状态码。 */
+    int deviceErrorStatus(DeviceError error)
+    {
+        switch (error)
+        {
+        case DeviceError::DEVICE_NOT_FOUND:
+            return 404;
+        case DeviceError::DUPLICATE_ID:
+        case DeviceError::GPIO_IN_USE:
+        case DeviceError::DEVICE_LIMIT_REACHED:
+            return 409;
+        case DeviceError::INVALID_ID:
+        case DeviceError::INVALID_NAME:
+        case DeviceError::PWM_PIN_UNAVAILABLE:
+        case DeviceError::RPM_PIN_UNAVAILABLE:
+        case DeviceError::PIN_CONFLICT:
+        case DeviceError::INVALID_DUTY:
+        case DeviceError::INVALID_PULSES_PER_REVOLUTION:
+            return 400;
+        default:
+            return 500;
+        }
+    }
+
+    /** 将设备管理错误转换为 API 响应。 */
+    void sendDeviceError(AsyncWebServerRequest *request, DeviceError error)
+    {
+        sendMessage(request, deviceErrorStatus(error), DeviceManager::getErrorCode(error),
+                    DeviceManager::getErrorMessage(error));
     }
 
     /** 严格解析 /api/devices/{id}{suffix}。 */
@@ -140,11 +173,13 @@ namespace
 
     /** 读取设备配置请求。 */
     bool readDeviceRequest(JsonVariantConst json, String &name, uint8_t &pwmPin, int8_t &rpmPin,
-                           bool &inverted, uint8_t &pulsesPerRevolution, String &error)
+                           bool &inverted, uint8_t &pulsesPerRevolution,
+                           const char *&errorCode, const char *&errorMessage)
     {
         if (!json.is<JsonObjectConst>())
         {
-            error = "请求必须是 JSON 对象";
+            errorCode = "INVALID_JSON_OBJECT";
+            errorMessage = "The request body must be a JSON object";
             return false;
         }
 
@@ -152,7 +187,8 @@ namespace
         name.trim();
         if (name.isEmpty() || name.length() > 20)
         {
-            error = "设备名称长度必须为 1～20 个字符";
+            errorCode = "INVALID_DEVICE_NAME";
+            errorMessage = "The device name must contain 1 to 20 characters";
             return false;
         }
 
@@ -161,24 +197,28 @@ namespace
         long pprValue = DEFAULT_PULSES_PER_REVOLUTION;
         if (!readInteger(json, "pwmPin", 0, 21, pwmValue))
         {
-            error = "PWM 引脚格式无效";
+            errorCode = "INVALID_PWM_PIN_FORMAT";
+            errorMessage = "The PWM pin format is invalid";
             return false;
         }
         if (!json["rpmPin"].isNull() && !readInteger(json, "rpmPin", -1, 21, rpmValue))
         {
-            error = "转速引脚格式无效";
+            errorCode = "INVALID_RPM_PIN_FORMAT";
+            errorMessage = "The RPM pin format is invalid";
             return false;
         }
         if (!json["pulsesPerRevolution"].isNull() &&
             !readInteger(json, "pulsesPerRevolution", MIN_PULSES_PER_REVOLUTION,
                          MAX_PULSES_PER_REVOLUTION, pprValue))
         {
-            error = "每转脉冲数必须为 1～8";
+            errorCode = "INVALID_PULSES_PER_REVOLUTION";
+            errorMessage = "Pulses per revolution must be from 1 to 8";
             return false;
         }
         if (!json["inverted"].isNull() && !json["inverted"].is<bool>())
         {
-            error = "反转标志格式无效";
+            errorCode = "INVALID_INVERTED_FLAG";
+            errorMessage = "The inverted flag must be a boolean";
             return false;
         }
 
@@ -209,7 +249,7 @@ namespace
         server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/devices") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         std::vector<DeviceStatus> statuses;
@@ -227,13 +267,13 @@ namespace
         server.on("/api/devices/save", HTTP_POST, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/devices/save") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         if (DeviceManager::saveToNVS()) {
-            sendMessage(request, 200, "全部设备配置已保存");
+            sendMessage(request, 200, "DEVICES_SAVED", "All device settings were saved");
         } else {
-            sendMessage(request, 500, "NVS 保存失败");
+            sendMessage(request, 500, "NVS_SAVE_FAILED", "Failed to save to NVS");
         } });
 
         auto *postJsonHandler = new AsyncCallbackJsonWebHandler(
@@ -242,22 +282,26 @@ namespace
             const String url = request->url();
             if (url == "/api/devices") {
                 String name;
-                String error;
+                const char *errorCode = nullptr;
+                const char *errorMessage = nullptr;
                 uint8_t pwmPin;
                 int8_t rpmPin;
                 bool inverted;
                 uint8_t ppr;
-                if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr, error)) {
-                    sendMessage(request, 400, error);
+                if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr,
+                                       errorCode, errorMessage)) {
+                    sendMessage(request, 400, errorCode, errorMessage);
                     return;
                 }
+                DeviceError error = DeviceError::NONE;
                 const uint8_t id = DeviceManager::addDevice(name, pwmPin, rpmPin, inverted, ppr, error);
                 if (id == 0) {
-                    sendMessage(request, 409, error);
+                    sendDeviceError(request, error);
                     return;
                 }
                 JsonDocument response;
-                response["message"] = "设备添加成功";
+                response["code"] = "DEVICE_ADDED";
+                response["message"] = "Device added";
                 response["id"] = id;
                 String body;
                 serializeJson(response, body);
@@ -267,20 +311,20 @@ namespace
 
             uint8_t id;
             if (!parseDeviceId(url, "/duty", id)) {
-                sendMessage(request, 404, "未找到");
+                sendMessage(request, 404, "NOT_FOUND", "Not found");
                 return;
             }
             long duty;
             if (!readInteger(json, "dutyCycle", 0, 100, duty)) {
-                sendMessage(request, 400, "占空比必须为 0～100 的整数");
+                sendMessage(request, 400, "INVALID_DUTY_CYCLE", "Duty cycle must be an integer from 0 to 100");
                 return;
             }
-            String error;
+            DeviceError error = DeviceError::NONE;
             if (!DeviceManager::setDutyCycle(id, static_cast<uint8_t>(duty), error)) {
-                sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+                sendDeviceError(request, error);
                 return;
             }
-            sendMessage(request, 200, "占空比已设置"); });
+            sendMessage(request, 200, "DUTY_CYCLE_SET", "Duty cycle updated"); });
         postJsonHandler->setMethod(HTTP_POST);
         server.addHandler(postJsonHandler);
 
@@ -289,39 +333,42 @@ namespace
                   {
         uint8_t id;
         if (!parseDeviceId(request->url(), "/save", id)) {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
-        String error;
+        DeviceError error = DeviceError::NONE;
         if (!DeviceManager::saveDutyToNVS(id, error)) {
-            sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+            sendDeviceError(request, error);
             return;
         }
-        sendMessage(request, 200, "占空比已保存"); });
+        sendMessage(request, 200, "DUTY_CYCLE_SAVED", "Duty cycle saved"); });
 
         auto *putJsonHandler = new AsyncCallbackJsonWebHandler(
             "/api/devices", [](AsyncWebServerRequest *request, JsonVariant &json)
             {
             uint8_t id;
             if (!parseDeviceId(request->url(), "", id)) {
-                sendMessage(request, 404, "未找到");
+                sendMessage(request, 404, "NOT_FOUND", "Not found");
                 return;
             }
             String name;
-            String error;
+            const char *errorCode = nullptr;
+            const char *errorMessage = nullptr;
             uint8_t pwmPin;
             int8_t rpmPin;
             bool inverted;
             uint8_t ppr;
-            if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr, error)) {
-                sendMessage(request, 400, error);
+            if (!readDeviceRequest(json, name, pwmPin, rpmPin, inverted, ppr,
+                                   errorCode, errorMessage)) {
+                sendMessage(request, 400, errorCode, errorMessage);
                 return;
             }
+            DeviceError error = DeviceError::NONE;
             if (!DeviceManager::updateDevice(id, name, pwmPin, rpmPin, inverted, ppr, error)) {
-                sendMessage(request, error == "设备不存在" ? 404 : 409, error);
+                sendDeviceError(request, error);
                 return;
             }
-            sendMessage(request, 200, "设备已更新并保存"); });
+            sendMessage(request, 200, "DEVICE_UPDATED", "Device updated and saved"); });
         putJsonHandler->setMethod(HTTP_PUT);
         server.addHandler(putJsonHandler);
 
@@ -329,15 +376,15 @@ namespace
                   {
         uint8_t id;
         if (!parseDeviceId(request->url(), "", id)) {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
-        String error;
+        DeviceError error = DeviceError::NONE;
         if (!DeviceManager::removeDevice(id, error)) {
-            sendMessage(request, error == "设备不存在" ? 404 : 500, error);
+            sendDeviceError(request, error);
             return;
         }
-        sendMessage(request, 200, "设备已删除"); });
+        sendMessage(request, 200, "DEVICE_DELETED", "Device deleted"); });
     }
 
     /** 注册 WiFi API。 */
@@ -346,7 +393,7 @@ namespace
         server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/wifi") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         const WiFiConfig config = ConfigManager::loadWiFiConfig();
@@ -364,20 +411,20 @@ namespace
             "/api/wifi", [](AsyncWebServerRequest *request, JsonVariant &json)
             {
             if (request->url() != "/api/wifi" || !json.is<JsonObjectConst>()) {
-                sendMessage(request, 400, "请求格式错误");
+                sendMessage(request, 400, "INVALID_REQUEST", "Invalid request format");
                 return;
             }
             const String ssid = json["ssid"] | "";
             const String password = json["password"] | "";
             if (ssid.isEmpty() || ssid.length() > 32 || password.length() > 64) {
-                sendMessage(request, 400, "SSID 或密码长度无效");
+                sendMessage(request, 400, "INVALID_WIFI_CREDENTIALS", "The SSID or password length is invalid");
                 return;
             }
             if (!WiFiManager::requestConnect(ssid, password)) {
-                sendMessage(request, 500, "无法启动 WiFi 连接");
+                sendMessage(request, 500, "WIFI_CONNECT_FAILED", "Unable to start the WiFi connection");
                 return;
             }
-            sendMessage(request, 202, "正在后台验证新 WiFi，救援 AP 将保持开启"); });
+            sendMessage(request, 202, "WIFI_CONNECTING", "Validating the new WiFi connection; the rescue AP remains active"); });
         wifiJsonHandler->setMethod(HTTP_POST);
         server.addHandler(wifiJsonHandler);
     }
@@ -388,7 +435,7 @@ namespace
         server.on("/api/system/info", HTTP_GET, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/system/info") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         JsonDocument doc;
@@ -406,15 +453,15 @@ namespace
         server.on("/api/system/reset", HTTP_POST, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/system/reset") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         if (!ConfigManager::clearAll()) {
-            sendMessage(request, 500, "清空 NVS 失败");
+            sendMessage(request, 500, "NVS_CLEAR_FAILED", "Failed to clear NVS settings");
             return;
         }
         scheduleRestart(RestartReason::RESET_SETTINGS);
-        sendMessage(request, 200, "设置已清空，设备即将重启"); });
+        sendMessage(request, 200, "SETTINGS_RESET", "Settings cleared; the controller will restart"); });
     }
 
     /** 注册 Web 登录认证配置 API。 */
@@ -423,7 +470,7 @@ namespace
         server.on("/api/system/auth", HTTP_GET, [](AsyncWebServerRequest *request)
                   {
         if (request->url() != "/api/system/auth") {
-            sendMessage(request, 404, "未找到");
+            sendMessage(request, 404, "NOT_FOUND", "Not found");
             return;
         }
         JsonDocument doc;
@@ -436,7 +483,7 @@ namespace
             "/api/system/auth", [](AsyncWebServerRequest *request, JsonVariant &json)
             {
             if (request->url() != "/api/system/auth" || !json.is<JsonObjectConst>()) {
-                sendMessage(request, 400, "请求格式错误");
+                sendMessage(request, 400, "INVALID_REQUEST", "Invalid request format");
                 return;
             }
 
@@ -444,27 +491,27 @@ namespace
             const String password = json["password"] | "";
             username.trim();
             if (!isValidWebUsername(username)) {
-                sendMessage(request, 400, "用户名只能包含 1～32 位字母、数字、点、下划线或连字符");
+                sendMessage(request, 400, "INVALID_USERNAME", "Username must contain 1 to 32 letters, numbers, dots, underscores, or hyphens");
                 return;
             }
             if (password.length() < MIN_WEB_PASSWORD_LENGTH ||
                 password.length() > MAX_WEB_PASSWORD_LENGTH) {
-                sendMessage(request, 400, "密码长度必须为 8～64 位");
+                sendMessage(request, 400, "INVALID_PASSWORD_LENGTH", "Password must contain 8 to 64 characters");
                 return;
             }
 
             const String passwordHash = generateDigestHash(username.c_str(), password.c_str(), WEB_REALM);
             if (passwordHash.length() != 32) {
-                sendMessage(request, 500, "登录密码哈希生成失败");
+                sendMessage(request, 500, "PASSWORD_HASH_FAILED", "Failed to generate the login password hash");
                 return;
             }
             if (!ConfigManager::saveWebAuthConfig({username, passwordHash})) {
-                sendMessage(request, 500, "登录配置保存失败");
+                sendMessage(request, 500, "AUTH_SAVE_FAILED", "Failed to save web login settings");
                 return;
             }
 
             scheduleRestart(RestartReason::AUTH_CHANGED);
-            sendMessage(request, 200, "登录配置已保存，设备即将重启"); });
+            sendMessage(request, 200, "AUTH_SAVED", "Web login settings saved; the controller will restart"); });
         authJsonHandler->setMethod(HTTP_POST);
         server.addHandler(authJsonHandler);
     }
@@ -488,7 +535,7 @@ void WebServer::init()
     authentication.setUsername(authUsername.c_str());
     authentication.setPasswordHash(authPasswordHash.c_str());
     authentication.setRealm(WEB_REALM);
-    authentication.setAuthFailureMessage("需要管理员认证");
+    authentication.setAuthFailureMessage("Administrator authentication required");
     authentication.setAuthType(AsyncAuthType::AUTH_DIGEST);
     if (!authentication.hasCredentials())
     {
@@ -503,11 +550,16 @@ void WebServer::init()
 
     if (fsReady)
     {
+        // 中文入口复用同一个页面，前端根据路径选择语言。
+        server.on("/zh", HTTP_GET, [](AsyncWebServerRequest *request)
+                  { request->send(LittleFS, "/index.html", "text/html"); });
+        server.on("/zh/", HTTP_GET, [](AsyncWebServerRequest *request)
+                  { request->send(LittleFS, "/index.html", "text/html"); });
         server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
     }
 
     server.onNotFound([](AsyncWebServerRequest *request)
-                      { sendMessage(request, 404, "未找到"); });
+                      { sendMessage(request, 404, "NOT_FOUND", "Not found"); });
     server.begin();
     Serial.printf("[Web] 服务器已启动，端口=%u\n", WEB_SERVER_PORT);
 }

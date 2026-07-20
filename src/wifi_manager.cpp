@@ -11,101 +11,101 @@
 
 namespace
 {
-constexpr char AP_SSID_PREFIX[] = "PWM-Controller";
-constexpr char AP_PASSWORD[] = "pwm-controller";
-constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
-constexpr uint32_t WIFI_RECOVERY_TIMEOUT_MS = 30000;
+    constexpr char AP_SSID_PREFIX[] = "PWM-Controller";
+    constexpr char AP_PASSWORD[] = "pwm-controller";
+    constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+    constexpr uint32_t WIFI_RECOVERY_TIMEOUT_MS = 30000;
 
-enum class ConnectionState
-{
-    AP,
-    CONNECTING,
-    CONNECTED,
-    FAILED
-};
-
-ConnectionState state = ConnectionState::AP;
-WiFiConfig pendingConfig;
-WiFiConfig activeConfig;
-bool persistPendingConfig = false;
-bool apMode = false;
-uint32_t connectStartedAt = 0;
-uint32_t disconnectedAt = 0;
-String apSsid;
-SemaphoreHandle_t wifiMutex = nullptr;
-
-/** 自动获取和释放 WiFi 状态互斥锁。 */
-class WiFiLock
-{
-public:
-    WiFiLock() : locked(wifiMutex && xSemaphoreTake(wifiMutex, portMAX_DELAY) == pdTRUE) {}
-    ~WiFiLock()
+    enum class ConnectionState
     {
-        if (locked)
+        AP,
+        CONNECTING,
+        CONNECTED,
+        FAILED
+    };
+
+    ConnectionState state = ConnectionState::AP;
+    WiFiConfig pendingConfig;
+    WiFiConfig activeConfig;
+    bool persistPendingConfig = false;
+    bool apMode = false;
+    uint32_t connectStartedAt = 0;
+    uint32_t disconnectedAt = 0;
+    String apSsid;
+    SemaphoreHandle_t wifiMutex = nullptr;
+
+    /** 自动获取和释放 WiFi 状态互斥锁。 */
+    class WiFiLock
+    {
+    public:
+        WiFiLock() : locked(wifiMutex && xSemaphoreTake(wifiMutex, portMAX_DELAY) == pdTRUE) {}
+        ~WiFiLock()
         {
-            xSemaphoreGive(wifiMutex);
+            if (locked)
+            {
+                xSemaphoreGive(wifiMutex);
+            }
         }
-    }
-    explicit operator bool() const { return locked; }
+        explicit operator bool() const { return locked; }
 
-private:
-    bool locked;
-};
+    private:
+        bool locked;
+    };
 
-/** 启动或保持救援 AP，调用者必须持有 wifiMutex。 */
-bool startAPLocked()
-{
-    if (apSsid.isEmpty())
+    /** 启动或保持救援 AP，调用者必须持有 wifiMutex。 */
+    bool startAPLocked()
     {
-        const uint32_t shortId = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFFULL);
-        char suffix[8];
-        snprintf(suffix, sizeof(suffix), "%06lX", static_cast<unsigned long>(shortId));
-        apSsid = String(AP_SSID_PREFIX) + "-" + suffix;
-    }
-
-    WiFi.mode(WIFI_AP_STA);
-    if (!apMode)
-    {
-        if (!WiFi.softAP(apSsid.c_str(), AP_PASSWORD))
+        if (apSsid.isEmpty())
         {
-            Serial.println("[WiFi] 救援 AP 启动失败");
+            const uint32_t shortId = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFFULL);
+            char suffix[8];
+            snprintf(suffix, sizeof(suffix), "%06lX", static_cast<unsigned long>(shortId));
+            apSsid = String(AP_SSID_PREFIX) + "-" + suffix;
+        }
+
+        WiFi.mode(WIFI_AP_STA);
+        if (!apMode)
+        {
+            if (!WiFi.softAP(apSsid.c_str(), AP_PASSWORD))
+            {
+                Serial.println("[WiFi] 救援 AP 启动失败");
+                return false;
+            }
+            apMode = true;
+        }
+
+        if (state != ConnectionState::CONNECTING)
+        {
+            state = ConnectionState::AP;
+        }
+        Serial.printf("[WiFi] 救援 AP: SSID=%s, IP=%s\n",
+                      apSsid.c_str(), WiFi.softAPIP().toString().c_str());
+        return true;
+    }
+
+    /** 启动一次 STA 连接，同时保留 AP 可访问性。 */
+    bool beginConnection(const WiFiConfig &config, bool persistOnSuccess)
+    {
+        if (config.ssid.isEmpty())
+        {
             return false;
         }
-        apMode = true;
-    }
+        if (!apMode && !startAPLocked())
+        {
+            return false;
+        }
 
-    if (state != ConnectionState::CONNECTING)
-    {
-        state = ConnectionState::AP;
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.disconnect(false, false);
+        pendingConfig = config;
+        persistPendingConfig = persistOnSuccess;
+        connectStartedAt = millis();
+        disconnectedAt = 0;
+        state = ConnectionState::CONNECTING;
+        WiFi.begin(config.ssid.c_str(), config.password.c_str());
+        Serial.printf("[WiFi] 异步连接开始: SSID=%s\n", config.ssid.c_str());
+        return true;
     }
-    Serial.printf("[WiFi] 救援 AP: SSID=%s, IP=%s\n",
-                  apSsid.c_str(), WiFi.softAPIP().toString().c_str());
-    return true;
-}
-
-/** 启动一次 STA 连接，同时保留 AP 可访问性。 */
-bool beginConnection(const WiFiConfig &config, bool persistOnSuccess)
-{
-    if (config.ssid.isEmpty())
-    {
-        return false;
-    }
-    if (!apMode && !startAPLocked())
-    {
-        return false;
-    }
-
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.disconnect(false, false);
-    pendingConfig = config;
-    persistPendingConfig = persistOnSuccess;
-    connectStartedAt = millis();
-    disconnectedAt = 0;
-    state = ConnectionState::CONNECTING;
-    WiFi.begin(config.ssid.c_str(), config.password.c_str());
-    Serial.printf("[WiFi] 异步连接开始: SSID=%s\n", config.ssid.c_str());
-    return true;
-}
 } // namespace
 
 void WiFiManager::init()

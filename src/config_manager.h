@@ -36,12 +36,12 @@ static const uint8_t MAX_PULSES_PER_REVOLUTION = 8;
  */
 struct DeviceConfig
 {
-    uint8_t id;        ///< 设备唯一ID
-    String name;       ///< 设备名称
-    uint8_t pwmPin;    ///< PWM 输出引脚
-    int8_t rpmPin;     ///< 转速读取引脚（-1 表示无）
-    uint8_t dutyCycle; ///< 当前占空比 (0-100)
-    bool inverted;     ///< 是否反转 PWM 信号
+    uint8_t id;                  ///< 设备唯一ID
+    String name;                 ///< 设备名称
+    uint8_t pwmPin;              ///< PWM 输出引脚
+    int8_t rpmPin;               ///< 转速读取引脚（-1 表示无）
+    uint8_t dutyCycle;           ///< 当前占空比 (0-100)
+    bool inverted;               ///< 是否反转 PWM 信号
     uint8_t pulsesPerRevolution; ///< 转速信号每转脉冲数
 };
 
